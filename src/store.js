@@ -29,6 +29,12 @@ class MemoryKV {
   }
   async del(k) { this.m.delete(k); }
   async pttl(k) { const v = this.m.get(k); return v ? Math.max(0, v.exp - Date.now()) : -2; }
+  async incr(k, ttlMs) {
+    const cur = Number(await this.get(k)) || 0;
+    const exp = this.m.get(k)?.exp ?? Date.now() + ttlMs;
+    this.m.set(k, { val: String(cur + 1), exp });
+    return cur + 1;
+  }
   async close() {}
 }
 
@@ -57,6 +63,13 @@ class RedisKV {
   setNx(k, v, ttlMs) { return this.#s(async () => (await this.r.set(k, v, 'PX', ttlMs, 'NX')) === 'OK', true); }
   async del(k) { await this.#s(() => this.r.del(k)); }
   pttl(k) { return this.#s(() => this.r.pttl(k), -2); }
+  incr(k, ttlMs) {
+    return this.#s(async () => {
+      const n = await this.r.incr(k);
+      if (n === 1) await this.r.pexpire(k, ttlMs);
+      return n;
+    }, 0); // fail open: Redis down = not counted
+  }
   async close() { await this.r.quit().catch(() => {}); }
 }
 
@@ -89,7 +102,7 @@ export const cache = {
     if (!row) return null;
     const data = {
       urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
-      host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
+      host: row.host, title: row.title, thin: (row.caption || '').includes('mostly empty'), mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
       at: new Date(row.created_at).getTime(),
     };
     const left = data.at + CFG.cacheTtlMs - Date.now();
@@ -118,4 +131,10 @@ export const previews = {
   get: (key) => kv.get(`prev:${key}`),
   set: (key, fileId) => kv.set(`prev:${key}`, fileId, CFG.cacheTtlMs),
   cooldownOk: (uid) => kv.setNx(`pcd:${uid}`, '1', 10_000),
+};
+
+const dayStamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
+export const quota = {
+  // returns how many new downloads this user has started today (UTC), including this one
+  consume: (uid) => kv.incr(`quota:${uid}:${dayStamp()}`, 26 * 60 * 60 * 1000),
 };

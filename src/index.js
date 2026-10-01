@@ -12,7 +12,7 @@ import { assertPublicHost } from './net.js';
 import { warmBrowser, closeBrowser, screenshotPage, browserSem } from './browser.js';
 import { makeUpdater } from './updater.js';
 import * as db from './db.js';
-import { initStore, closeStore, cache, limits, previews, kvMode } from './store.js';
+import { initStore, closeStore, cache, limits, previews, quota, kvMode } from './store.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -42,6 +42,9 @@ const HELP = [
 ].join('\n');
 
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
+const denyAdmin = (ctx) => ctx.reply(CFG.adminIds.length
+  ? '🔒 Admins only.'
+  : '🔒 Admin commands are off. Set ADMIN_IDS on the server to your Telegram ID (send /myid to see it) and redeploy.');
 const argOf = (ctx) => ctx.message.text.split(/\s+/)[1];
 const fmtAgo = (ms) => {
   const m = Math.floor(ms / 60000);
@@ -52,11 +55,14 @@ const fmtAgo = (ms) => {
 };
 const sec = (ms) => (ms == null ? '–' : `${(ms / 1000).toFixed(1)}s`);
 
-const keyboard = (key, { refresh }) =>
-  Markup.inlineKeyboard([[
-    Markup.button.callback('🖼 Preview', `p:${key}`),
-    ...(refresh ? [Markup.button.callback('🔄 Fresh copy', `r:${key}`)] : []),
-  ]]);
+const keyboard = (key, { refresh, thin }) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback('🖼 Preview', `p:${key}`),
+      ...(refresh ? [Markup.button.callback('🔄 Fresh copy', `r:${key}`)] : []),
+    ],
+    ...(thin ? [[Markup.button.callback('🧭 Retry in browser mode', `b:${key}`)]] : []),
+  ]);
 
 async function authorize(ctx) {
   if (CFG.allowedUsers.length && !CFG.allowedUsers.includes(ctx.from.id)) {
@@ -73,6 +79,8 @@ async function authorize(ctx) {
 // ---------- commands ----------
 bot.start((ctx) => ctx.reply(HELP));
 bot.help((ctx) => ctx.reply(HELP));
+
+bot.command('myid', (ctx) => ctx.reply(`Your Telegram ID: ${ctx.from.id}${isAdmin(ctx) ? '\n✅ You are an admin.' : ''}`));
 
 bot.command('download', (ctx) => {
   const arg = argOf(ctx);
@@ -106,7 +114,7 @@ bot.command('history', async (ctx) => {
 });
 
 bot.command('stats', async (ctx) => {
-  if (!isAdmin(ctx)) return;
+  if (!isAdmin(ctx)) return denyAdmin(ctx);
   const s = db.enabled() ? await db.stats() : null;
   const pct = (a, b) => (Number(b) ? `${Math.round((Number(a) / Number(b)) * 100)}%` : '–');
   const lines = [
@@ -132,7 +140,7 @@ bot.command('stats', async (ctx) => {
 
 for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
   bot.command(cmd, async (ctx) => {
-    if (!isAdmin(ctx)) return;
+    if (!isAdmin(ctx)) return denyAdmin(ctx);
     const id = Number(argOf(ctx));
     if (!Number.isInteger(id)) return ctx.reply(`Usage: /${cmd} <telegram_id>`);
     const ok = await db.setBanned(id, flag);
@@ -165,6 +173,14 @@ bot.action(/^p:([a-f0-9]{40})$/, async (ctx) => {
   const url = await cache.urlFor(ctx.match[1]);
   if (!url) return ctx.reply('Send the link again, then tap Preview.');
   sendPreview(ctx, url).catch(console.error);
+});
+
+bot.action(/^b:([a-f0-9]{40})$/, async (ctx) => {
+  await ctx.answerCbQuery('Retrying in browser mode…').catch(() => {});
+  if (!CFG.enableBrowser) return ctx.reply('🧭 Browser mode is disabled on this bot.');
+  const url = await cache.urlFor(ctx.match[1]);
+  if (!url) return ctx.reply('Send the link again, then use /browser <url>.');
+  handleRequest(ctx, url, { force: true, forceBrowser: true }).catch(console.error);
 });
 
 bot.on('text', (ctx) => {
@@ -213,7 +229,7 @@ async function sendStored(ctx, data, label) {
   try {
     ctx.sendChatAction('upload_document').catch(() => {});
     const extra = { caption: `${data.caption}\n⚡ ${label} (${fmtAgo(Date.now() - data.at)})`.slice(0, 1000) };
-    if (data.urlKey) Object.assign(extra, keyboard(data.urlKey, { refresh: true }));
+    if (data.urlKey) Object.assign(extra, keyboard(data.urlKey, { refresh: true, thin: data.thin }));
     await ctx.replyWithDocument(data.fileId, extra);
     return true;
   } catch (e) {
@@ -257,6 +273,11 @@ async function handleRequest(ctx, raw, { force = false, forceBrowser = false } =
     held = true;
     const wait = await limits.cooldownLeft(uid);
     if (wait > 0) return ctx.reply(`⏳ Please wait ${Math.ceil(wait / 1000)}s before your next request.`);
+    if (CFG.dailyLimit && !isAdmin(ctx)) {
+      const used = await quota.consume(uid);
+      if (used > CFG.dailyLimit)
+        return ctx.reply(`📅 You've used today's ${CFG.dailyLimit} new downloads. Sites I already have cached and previews still work. The limit resets at 00:00 UTC.`);
+    }
     ran = true;
     await build(ctx, parsed, key, base, { forceBrowser });
   } finally {
@@ -318,6 +339,7 @@ function buildCaption(r) {
   lines.push(`📁 ${r.fileCount} files • ${mb(r.zipBytes)} MB • ${r.mode === 'browser' ? 'browser mode' : 'fast mode'}`);
   if (r.skipped + r.failed > 0) lines.push(`⚠️ ${r.skipped} skipped, ${r.failed} failed (see skipped.txt)`);
   lines.push(...r.warnings);
+  if (r.thin) lines.push('🤔 This page looks mostly empty. It may load its content with JavaScript, so try browser mode.');
   lines.push(`Unzip and open index.html${r.mode === 'browser' ? ' (see README.txt)' : ''}`);
   return lines.join('\n').slice(0, 900);
 }
@@ -333,11 +355,11 @@ async function produce(ctx, parsed, key, update, opts) {
     const tu = Date.now();
     const msg = await ctx.replyWithDocument(
       { source: r.zipPath, filename: r.zipName },
-      { caption, ...keyboard(key, { refresh: false }) }
+      { caption, ...keyboard(key, { refresh: false, thin: r.thin }) }
     );
     r.timings.upload = Date.now() - tu;
     const data = {
-      urlKey: key, fileId: msg.document.file_id, fileName: r.zipName, caption, title: r.title,
+      urlKey: key, fileId: msg.document.file_id, fileName: r.zipName, caption, title: r.title, thin: r.thin,
       host: r.host, mode: r.mode, files: r.fileCount, zipBytes: r.zipBytes, at: Date.now(), timings: r.timings,
     };
     await Promise.all([cache.setResult(key, data), cache.rememberUrl(key, parsed.url.href)]);
@@ -358,13 +380,30 @@ async function main() {
   db.startRetention();
   if (CFG.enableBrowser) warmBrowser().then(() => console.log('Chromium warmed up')).catch((e) => console.error('Chromium warm-up failed:', e.message));
 
-  bot.telegram.setMyCommands([
+  const commands = [
     { command: 'start', description: 'How to use the bot' },
     { command: 'preview', description: 'Screenshot of a live site: /preview example.com' },
     { command: 'browser', description: 'Force browser mode: /browser example.com' },
     { command: 'history', description: 'Your recent downloads' },
     { command: 'download', description: 'Download a site: /download example.com' },
-  ]).catch(() => {});
+    { command: 'myid', description: 'Show your Telegram ID' },
+  ];
+  bot.telegram.setMyCommands(commands).catch(() => {});
+  if (CFG.adminIds.length) {
+    const adminCommands = [
+      ...commands,
+      { command: 'stats', description: 'Admin: usage, speed and errors' },
+      { command: 'ban', description: 'Admin: /ban <telegram_id>' },
+      { command: 'unban', description: 'Admin: /unban <telegram_id>' },
+    ];
+    for (const id of CFG.adminIds) {
+      // admins see the extra commands in their own menu (works once they have messaged the bot)
+      bot.telegram.setMyCommands(adminCommands, { scope: { type: 'chat', chat_id: id } }).catch(() => {});
+    }
+    console.log(`Admins: ${CFG.adminIds.join(', ')}`);
+  } else {
+    console.log('ADMIN_IDS not set: /stats, /ban, /unban are disabled. Message the bot /myid to get your ID.');
+  }
 
   bot.launch({ dropPendingUpdates: true }).catch((e) => { console.error(e); process.exit(1); });
   console.log('Website Downloader (@WebsiteDownloaderBot) is running.');

@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { TG_TARGET_BYTES } from './config.js';
 
-// Lower rank = dropped first. Media and big images go before fonts, and code/styles are kept to the end.
+// Lower rank = dropped first. Rank 3 (HTML, CSS, JS, JSON, SVG) is NEVER removed: dropping code breaks a page,
+// while a missing image just falls back to its original online URL.
 const rank = (f) => {
   if (/\.(mp4|webm|mov|mp3|ogg|wav|m4a)$/i.test(f.local) || /^(video|audio)\//.test(f.type)) return 0;
   if (/\.(png|jpe?g|gif|webp|avif|bmp|ico)$/i.test(f.local) || /^image\/(?!svg)/.test(f.type)) return 1;
@@ -16,9 +17,9 @@ export async function trimToBudget(job, target = TG_TARGET_BYTES) {
   const files = [...job.files.values()];
   let total = files.reduce((n, f) => n + estimate(f), 0);
   if (total <= target) return 0;
-  files.sort((a, b) => rank(a) - rank(b) || b.size - a.size);
+  const candidates = files.filter((f) => rank(f) < 3).sort((a, b) => rank(a) - rank(b) || b.size - a.size);
   let removed = 0;
-  for (const f of files) {
+  for (const f of candidates) {
     if (total <= target) break;
     await fs.rm(path.join(job.dir, f.local), { force: true });
     job.files.delete(f.url);

@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.2.0
+# Website Downloader (@WebsiteDownloaderBot) v1.2.1
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline ZIP.
 Send `example.com` (any format) -> get a ZIP -> unzip -> open `index.html`.
@@ -48,3 +48,12 @@ npm install
 npx playwright install chromium
 BOT_TOKEN=xxx npm start
 ```
+
+## Admins
+There is no admin screen. An admin is a Telegram user ID listed in the `ADMIN_IDS` variable.
+1. Send `/myid` to the bot to get your ID.
+2. Set `ADMIN_IDS=<your id>` (comma-separate several) and redeploy.
+3. Admins get `/stats` (usage, speed, errors), `/ban <id>`, `/unban <id>` in their command menu, and are exempt from `DAILY_LIMIT`.
+
+## Limits and safety knobs
+`DAILY_LIMIT` (new downloads per user per day), `COOLDOWN_SEC`, `MAX_FILE_MB`, `MAX_TOTAL_MB`, `JOB_TIMEOUT_SEC`. Analytics/ad trackers are never downloaded and are stripped from saved pages. Auto-trim only ever drops media, images and fonts, never code.

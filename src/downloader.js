@@ -5,7 +5,7 @@ import { CFG, TG_MAX_BYTES, mb } from './config.js';
 import { UserError, explainNetError } from './errors.js';
 import { safeFetch, readBody } from './net.js';
 import { Job } from './job.js';
-import { analyze, isChallengeHtml, looksLikeSpa } from './analyze.js';
+import { analyze, isChallengeHtml, looksLikeSpa, looksThin } from './analyze.js';
 import { decodeBody, rewriteHtml } from './extract.js';
 import { collectAssets, rewriteCssFiles } from './assets.js';
 import { renderWithBrowser, browserSem } from './browser.js';
@@ -173,7 +173,9 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
   const { size } = await fs.stat(zipPath);
   lap('zip', t);
   if (size > TG_MAX_BYTES)
-    throw new UserError(`📦 The ZIP came out at ${mb(size)} MB, over Telegram's 50 MB limit. Try a lighter page.`, 'zip_too_big');
+    throw new UserError(`📦 Even after leaving out media and images, this site's code and styles come to ${mb(size)} MB, over Telegram's 50 MB limit. I never remove CSS or JS, so I can't send this one.`, 'zip_too_big');
+
+  const thin = mode === 'fast' && CFG.enableBrowser && !opts.forceBrowser && looksThin(html0);
 
   return {
     zipPath,
@@ -187,5 +189,6 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
     skipped: job.skipped.length,
     failed: job.failed.length,
     timings,
+    thin,
   };
 }

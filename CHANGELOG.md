@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1
+- **Trim guard:** auto-trim never removes HTML, CSS, JS, JSON or SVG. If code alone is over Telegram's limit, the bot says so instead of sending a broken copy.
+- **Retry in browser mode:** results that look nearly empty (likely JavaScript-rendered) get a hint and a 🧭 button.
+- **Daily quota:** `DAILY_LIMIT` new downloads per user per UTC day (default 30, 0 = unlimited, admins exempt). Cached copies and previews are not counted.
+- **Tracker stripping:** analytics/ad/session-replay scripts and pixels are no longer downloaded and are removed from the saved pages.
+- **Admins made visible:** `/myid` shows your Telegram ID; admins get `/stats /ban /unban` in their command menu; non-admins get a clear message instead of silence.
+
 ## 1.2.0
 - **Auto-trim:** if a site would exceed Telegram's 50 MB limit, the largest media/images are dropped (then fonts, then code) and listed in `skipped.txt`, instead of failing. Raw collection cap raised to 120 MB (`MAX_TOTAL_MB`).
 - **Live progress:** status shows "Downloading assets 42/118". Status edits are now "latest wins", so they never queue up.

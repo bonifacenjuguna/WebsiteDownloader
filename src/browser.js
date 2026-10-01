@@ -2,9 +2,9 @@ import { CFG, mb } from './config.js';
 import { assertPublicHost } from './net.js';
 import { resolveUrl } from './extract.js';
 import { Semaphore } from './queue.js';
+import { isTrackerUrl } from './trackers.js';
 
 const KEEP = new Set(['stylesheet', 'script', 'image', 'font', 'media', 'manifest']);
-const TRACKERS = /(^|\.)(google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com|googleadservices\.com|facebook\.net|hotjar\.com|clarity\.ms|segment\.io|segment\.com|mixpanel\.com|sentry\.io|intercom\.io|fullstory\.com|newrelic\.com|nr-data\.net)$/i;
 
 // Shared by downloads and previews so total parallel pages stay capped.
 export const browserSem = new Semaphore(CFG.browserConcurrency);
@@ -50,7 +50,7 @@ async function guard(route) {
     const u = new URL(route.request().url());
     if (u.protocol === 'data:' || u.protocol === 'blob:') return await route.continue();
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return await route.abort();
-    if (TRACKERS.test(u.hostname)) return await route.abort();
+    if (isTrackerUrl(u.href)) return await route.abort();
     await assertPublicHost(u.hostname);
     return await route.continue();
   } catch {

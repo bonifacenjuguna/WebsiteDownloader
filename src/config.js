@@ -27,6 +27,8 @@ export const CFG = {
   cacheTtlMs: num('CACHE_TTL_MIN', 360) * 60 * 1000,
   negTtlMs: num('NEG_CACHE_SEC', 300) * 1000,
   retentionDays: num('RETENTION_DAYS', 90),
+  // new (non-cached) downloads per user per UTC day; 0 = unlimited; admins are exempt
+  dailyLimit: process.env.DAILY_LIMIT !== undefined && process.env.DAILY_LIMIT !== '' && Number(process.env.DAILY_LIMIT) >= 0 ? Number(process.env.DAILY_LIMIT) : 30,
   browserConcurrency: num('BROWSER_CONCURRENCY', 2),
   browserRecycleAfter: num('BROWSER_RECYCLE_AFTER', 40),
   ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',

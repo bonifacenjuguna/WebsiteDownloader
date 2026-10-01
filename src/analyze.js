@@ -56,3 +56,12 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
 
   return { fatal: null, warnings };
 }
+
+// Static HTML that is nearly empty but loads scripts: probably rendered by JavaScript.
+export function looksThin(html) {
+  const $ = cheerio.load(html);
+  const scripts = $('script[src]').length;
+  $('script,style,noscript,template').remove();
+  const text = $('body').text().replace(/\s+/g, ' ').trim().length;
+  return text < 600 && scripts >= 1;
+}

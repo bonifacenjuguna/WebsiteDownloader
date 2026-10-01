@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isTrackerUrl, INLINE_TRACKER, TRACKER_MENTION } from './trackers.js';
 
 const SKIP = /^(data:|blob:|javascript:|about:|mailto:|tel:|sms:|#)/i;
 const ASSET_REL = /(stylesheet|icon|manifest|mask-icon|preload|modulepreload|image_src)/i;
@@ -76,7 +77,7 @@ export function rewriteCss(css, base, from, map) {
 
 export function discover($, base) {
   const urls = new Set();
-  const add = (v) => { const u = resolveUrl(v, base); if (u) urls.add(u); };
+  const add = (v) => { const u = resolveUrl(v, base); if (u && !isTrackerUrl(u)) urls.add(u); };
   for (const [el, a, kind] of assetRefs($)) {
     const v = el.attribs[a];
     if (kind === 'srcset') parseSrcset(v).forEach((s) => add(s.url)); else add(v);
@@ -86,6 +87,21 @@ export function discover($, base) {
   return urls;
 }
 
+function stripTrackers($, base) {
+  const tracked = (v) => { const u = resolveUrl(v, base); return !!u && isTrackerUrl(u); };
+  $('script[src]').each((_, el) => { if (tracked($(el).attr('src'))) $(el).remove(); });
+  $('script:not([src])').each((_, el) => {
+    const type = ($(el).attr('type') || '').toLowerCase();
+    if (type && !/javascript|module/.test(type)) return; // leave JSON data blocks alone
+    const code = $(el).html() || '';
+    if (code.length < 3000 && INLINE_TRACKER.test(code)) $(el).remove();
+  });
+  $('link[href]').each((_, el) => { if (tracked($(el).attr('href'))) $(el).remove(); });
+  $('img[src],iframe[src]').each((_, el) => { if (tracked($(el).attr('src'))) $(el).remove(); });
+  $('noscript').each((_, el) => { if (TRACKER_MENTION.test($(el).html() || '')) $(el).remove(); });
+  $('style').each((_, el) => { if (/async-hide/.test($(el).text())) $(el).remove(); }); // A/B-test anti-flicker CSS
+}
+
 export function rewriteHtml($, base, map, { stripScripts = false } = {}) {
   const swap = (v) => {
     const abs = resolveUrl(v, base);
@@ -93,6 +109,7 @@ export function rewriteHtml($, base, map, { stripScripts = false } = {}) {
     const rec = map.get(abs);
     return rec ? relPath(FROM, rec.local) : abs;
   };
+  stripTrackers($, base);
   for (const [el, a, kind] of assetRefs($)) {
     const v = el.attribs[a];
     const out = kind === 'srcset'
