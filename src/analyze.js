@@ -20,7 +20,7 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
   const host = new URL(finalUrl).host;
 
   if (headers.get('cf-mitigated') === 'challenge' || ([403, 429, 503].includes(status) && isChallengeHtml(html)))
-    return { challenge: true, fatal: `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors, so I can't download it.`, warnings };
+    return { challenge: true, code: 'cloudflare', fatal: `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors, so I can't download it.`, warnings };
 
   const hasBody = isHtml && html.length > 400;
   if (status === 401 || status === 403) {
@@ -30,6 +30,7 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
         : '🚫 The site answered "403 Forbidden". I saved the page it served instead.');
     } else {
       return {
+        code: headers.get('www-authenticate') ? 'auth' : 'forbidden',
         fatal: headers.get('www-authenticate')
           ? `🔒 ${host} is password protected (HTTP login prompt). I can't get in without credentials.`
           : `🚫 ${host} answered "403 Forbidden" and blocks automated access.`,
@@ -37,13 +38,13 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
       };
     }
   } else if (status === 404 || status === 410) {
-    return { fatal: `❓ Page not found (HTTP ${status}). Check the address.`, warnings };
+    return { code: 'not_found', fatal: `❓ Page not found (HTTP ${status}). Check the address.`, warnings };
   } else if (status === 429) {
-    return { fatal: `⏳ ${host} is rate-limiting me (HTTP 429). Try again later.`, warnings };
+    return { code: 'rate_limited', fatal: `⏳ ${host} is rate-limiting me (HTTP 429). Try again later.`, warnings };
   } else if (status >= 500) {
-    return { fatal: `💥 ${host} has a server error (HTTP ${status}). It may be down.`, warnings };
+    return { code: 'server_error', fatal: `💥 ${host} has a server error (HTTP ${status}). It may be down.`, warnings };
   } else if (status >= 400) {
-    return { fatal: `${host} answered with HTTP ${status}.`, warnings };
+    return { code: 'http_error', fatal: `${host} answered with HTTP ${status}.`, warnings };
   }
 
   const reqPath = new URL(requestedUrl).pathname;

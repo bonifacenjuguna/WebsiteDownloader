@@ -3,7 +3,7 @@ import net from 'node:net';
 import { CFG } from './config.js';
 import { UserError } from './errors.js';
 
-const blocked = () => new UserError("🛑 That address is private or internal, so I can't download it.");
+const blocked = () => new UserError("🛑 That address is private or internal, so I can't download it.", 'blocked_address');
 const BLOCKED_NAME = /(^|\.)(localhost|local|internal|localdomain|lan|home|corp)$/i;
 
 function privV4(ip) {
@@ -59,7 +59,7 @@ export async function safeFetch(urlStr, { timeoutMs = CFG.fetchTimeoutMs, header
       const loc = res.headers.get('location');
       if (!loc) return { res, url: current };
       const next = new URL(loc, current);
-      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new UserError('Blocked redirect to an unsupported address.');
+      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new UserError('Blocked redirect to an unsupported address.', 'blocked_address');
       res.body?.cancel().catch(() => {});
       current = next;
       continue;

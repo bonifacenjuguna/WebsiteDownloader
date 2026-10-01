@@ -12,7 +12,7 @@ import { collectAssets, rewriteCssFiles } from './assets.js';
 import { renderWithBrowser } from './browser.js';
 import { zipDir } from './zip.js';
 
-const browserSem = new Semaphore(1); // Chromium is heavy: one at a time
+const browserSem = new Semaphore(CFG.browserConcurrency); // Chromium is heavy: cap parallel pages
 const cfMsg = (host) => `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors. I tried a real browser too and it didn't get through.`;
 
 async function fetchMain(url, explicitScheme) {
@@ -22,7 +22,7 @@ async function fetchMain(url, explicitScheme) {
       headers: { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
     });
     const body = await readBody(res, CFG.maxHtmlBytes);
-    if (body.tooBig) throw new UserError('📏 That page is too large to process.');
+    if (body.tooBig) throw new UserError('📏 That page is too large to process.', 'too_large');
     return {
       status: res.status,
       headers: res.headers,
@@ -83,13 +83,13 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
   const siteDir = path.join(workDir, 'site');
   await fs.mkdir(siteDir, { recursive: true });
 
-  await onStatus(`🌐 Fetching ${parsed.url.host}…`);
+  onStatus(`🌐 Fetching ${parsed.url.host}…`);
   const first = await fetchMain(parsed.url, parsed.explicitScheme);
   const isHtml = !first.contentType || /html/i.test(first.contentType);
   const html0 = isHtml ? decodeBody(first.buf, first.contentType) : '';
 
   if (first.status < 400 && !isHtml)
-    throw new UserError(`📄 That link isn't a web page (it's ${first.contentType.split(';')[0]}). Send a page address instead.`);
+    throw new UserError(`📄 That link isn't a web page (it's ${first.contentType.split(';')[0]}). Send a page address instead.`, 'not_html');
 
   const check = analyze({
     status: first.status,
@@ -99,7 +99,7 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
     finalUrl: first.finalUrl,
     isHtml,
   });
-  if (check.fatal && !check.challenge) throw new UserError(check.fatal);
+  if (check.fatal && !check.challenge) throw new UserError(check.fatal, check.code);
 
   const job = new Job(siteDir, first.finalUrl);
   const warnings = [...check.warnings];
@@ -109,26 +109,26 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
   const wantBrowser = CFG.enableBrowser && (check.challenge || looksLikeSpa(html0));
   if (wantBrowser) {
     try {
-      await onStatus('🧭 Loading it in a headless browser…');
+      onStatus('🧭 Loading it in a headless browser…');
       rendered = await browserSem.run(() => renderWithBrowser(job, first.finalUrl));
-      if (isChallengeHtml(rendered.html)) throw new UserError(cfMsg(job.main.host));
+      if (isChallengeHtml(rendered.html)) throw new UserError(cfMsg(job.main.host), 'cloudflare');
       mode = 'browser';
     } catch (e) {
       if (e instanceof UserError) throw e;
       console.error('browser mode failed:', e?.message);
-      if (check.challenge) throw new UserError(cfMsg(job.main.host));
+      if (check.challenge) throw new UserError(cfMsg(job.main.host), 'cloudflare');
       rendered = null;
       warnings.push('⚠️ The headless browser failed, so I saved the static HTML only.');
     }
   } else if (check.challenge) {
-    throw new UserError(check.fatal);
+    throw new UserError(check.fatal, 'cloudflare');
   }
 
   const base = rendered ? rendered.finalUrl : first.finalUrl;
   const original = (rendered && rendered.originalHtml) || html0;
   const docs = rendered ? [rendered.html, original] : [html0];
 
-  await onStatus('📦 Downloading assets…');
+  onStatus('📦 Downloading assets…');
   await collectAssets(job, docs, base);
   await rewriteCssFiles(job);
 
@@ -145,13 +145,13 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
   if (job.timedOut) warnings.push('⏱️ Time limit reached, so some files may be missing.');
   await writeInfoFiles(job, mode, first.finalUrl);
 
-  await onStatus('🗜️ Creating ZIP…');
+  onStatus('🗜️ Creating ZIP…');
   const zipName = `${job.main.hostname.replace(/[^a-z0-9.-]/gi, '_')}.zip`;
   const zipPath = path.join(workDir, zipName);
   await zipDir(siteDir, zipPath);
   const { size } = await fs.stat(zipPath);
   if (size > TG_MAX_BYTES)
-    throw new UserError(`📦 The ZIP came out at ${mb(size)} MB, over Telegram's 50 MB limit. Try a lighter page.`);
+    throw new UserError(`📦 The ZIP came out at ${mb(size)} MB, over Telegram's 50 MB limit. Try a lighter page.`, 'zip_too_big');
 
   return {
     zipPath,

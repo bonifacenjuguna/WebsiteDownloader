@@ -1,7 +1,8 @@
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { UserError } from './errors.js';
 
-const invalid = () => new UserError("That doesn't look like a valid website address. Try something like example.com");
+const invalid = () => new UserError("That doesn't look like a valid website address. Try something like example.com", 'invalid_url');
 
 export function normalizeUrl(input) {
   let s = String(input).trim().split(/\s+/)[0] || '';
@@ -19,4 +20,11 @@ export function normalizeUrl(input) {
   url.username = '';
   url.password = '';
   return { url, explicitScheme };
+}
+
+// Stable cache key: same site/path/query -> same key (scheme and trailing slash ignored)
+export function urlKey(url) {
+  let p = url.pathname;
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  return crypto.createHash('sha1').update(`${url.host.toLowerCase()}${p}${url.search}`).digest('hex');
 }
