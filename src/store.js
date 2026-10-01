@@ -89,7 +89,7 @@ export const cache = {
     if (!row) return null;
     const data = {
       urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
-      host: row.host, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
+      host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
       at: new Date(row.created_at).getTime(),
     };
     const left = data.at + CFG.cacheTtlMs - Date.now();
@@ -100,6 +100,9 @@ export const cache = {
   dropResult: (key) => kv.del(`res:${key}`),
   async getNegative(key) { return parse(await kv.get(`neg:${key}`)); },
   setNegative: (key, err) => kv.set(`neg:${key}`, JSON.stringify(err), CFG.negTtlMs),
+  // buttons carry only the 40-char key; this maps it back to the URL
+  rememberUrl: (key, url) => kv.set(`url:${key}`, url, 24 * 60 * 60 * 1000),
+  async urlFor(key) { return (await kv.get(`url:${key}`)) || (await db.urlForKey(key)); },
 };
 
 export const limits = {
@@ -109,4 +112,10 @@ export const limits = {
     await kv.del(`busy:${uid}`);
     if (ran) await kv.set(`cd:${uid}`, '1', CFG.cooldownMs);
   },
+};
+
+export const previews = {
+  get: (key) => kv.get(`prev:${key}`),
+  set: (key, fileId) => kv.set(`prev:${key}`, fileId, CFG.cacheTtlMs),
+  cooldownOk: (uid) => kv.setNx(`pcd:${uid}`, '1', 10_000),
 };

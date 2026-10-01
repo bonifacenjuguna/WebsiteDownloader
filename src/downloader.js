@@ -5,14 +5,13 @@ import { CFG, TG_MAX_BYTES, mb } from './config.js';
 import { UserError, explainNetError } from './errors.js';
 import { safeFetch, readBody } from './net.js';
 import { Job } from './job.js';
-import { Semaphore } from './queue.js';
 import { analyze, isChallengeHtml, looksLikeSpa } from './analyze.js';
 import { decodeBody, rewriteHtml } from './extract.js';
 import { collectAssets, rewriteCssFiles } from './assets.js';
-import { renderWithBrowser } from './browser.js';
+import { renderWithBrowser, browserSem } from './browser.js';
+import { trimToBudget } from './trim.js';
 import { zipDir } from './zip.js';
 
-const browserSem = new Semaphore(CFG.browserConcurrency); // Chromium is heavy: cap parallel pages
 const cfMsg = (host) => `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors. I tried a real browser too and it didn't get through.`;
 
 async function fetchMain(url, explicitScheme) {
@@ -47,7 +46,7 @@ async function fetchMain(url, explicitScheme) {
 async function writeInfoFiles(job, mode, sourceUrl) {
   const lines = [];
   if (job.skipped.length) {
-    lines.push('SKIPPED (too large or over limits):');
+    lines.push('SKIPPED (too large, trimmed or over limits):');
     for (const s of job.skipped) lines.push(`  ${s.url} - ${s.reason}${s.size ? ` (${mb(s.size)} MB)` : ''}`);
   }
   if (job.failed.length) {
@@ -79,12 +78,19 @@ async function writeInfoFiles(job, mode, sourceUrl) {
   await fs.writeFile(path.join(job.dir, 'README.txt'), readme + '\n');
 }
 
-export async function downloadSite(parsed, workDir, onStatus = () => {}) {
+export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = {}) {
+  if (opts.forceBrowser && !CFG.enableBrowser)
+    throw new UserError('🧭 Browser mode is disabled on this bot.', 'browser_disabled');
+
+  const timings = {};
+  const lap = (name, t0) => { timings[name] = Date.now() - t0; };
   const siteDir = path.join(workDir, 'site');
   await fs.mkdir(siteDir, { recursive: true });
 
+  let t = Date.now();
   onStatus(`🌐 Fetching ${parsed.url.host}…`);
   const first = await fetchMain(parsed.url, parsed.explicitScheme);
+  lap('fetch', t);
   const isHtml = !first.contentType || /html/i.test(first.contentType);
   const html0 = isHtml ? decodeBody(first.buf, first.contentType) : '';
 
@@ -106,17 +112,20 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
   let mode = 'fast';
   let rendered = null;
 
-  const wantBrowser = CFG.enableBrowser && (check.challenge || looksLikeSpa(html0));
+  const wantBrowser = CFG.enableBrowser && (opts.forceBrowser || check.challenge || looksLikeSpa(html0));
   if (wantBrowser) {
+    t = Date.now();
     try {
       onStatus('🧭 Loading it in a headless browser…');
       rendered = await browserSem.run(() => renderWithBrowser(job, first.finalUrl));
       if (isChallengeHtml(rendered.html)) throw new UserError(cfMsg(job.main.host), 'cloudflare');
       mode = 'browser';
+      lap('browser', t);
     } catch (e) {
       if (e instanceof UserError) throw e;
       console.error('browser mode failed:', e?.message);
       if (check.challenge) throw new UserError(cfMsg(job.main.host), 'cloudflare');
+      if (opts.forceBrowser) throw new UserError('🧭 Browser mode failed on this site. Try again later, or send the link normally.', 'browser_failed');
       rendered = null;
       warnings.push('⚠️ The headless browser failed, so I saved the static HTML only.');
     }
@@ -127,11 +136,22 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
   const base = rendered ? rendered.finalUrl : first.finalUrl;
   const original = (rendered && rendered.originalHtml) || html0;
   const docs = rendered ? [rendered.html, original] : [html0];
+  const title = cheerio.load(rendered ? rendered.html : html0)('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 80);
 
+  t = Date.now();
   onStatus('📦 Downloading assets…');
+  let lastEmit = 0;
+  job.onProgress = (done, total) => {
+    const n = Date.now();
+    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(`📦 Downloading assets ${done}/${total}…`); }
+  };
   await collectAssets(job, docs, base);
-  await rewriteCssFiles(job);
 
+  // too heavy for Telegram? drop the biggest media/images instead of failing
+  const trimmed = await trimToBudget(job);
+  if (trimmed) warnings.push(`✂️ ${trimmed} large file${trimmed > 1 ? 's were' : ' was'} left out to fit Telegram's 50 MB limit (see skipped.txt).`);
+
+  await rewriteCssFiles(job);
   if (rendered) {
     const snapshot = rewriteHtml(cheerio.load(rendered.html), base, job.files, { stripScripts: true });
     await fs.writeFile(path.join(siteDir, 'index.html'), snapshot);
@@ -141,15 +161,17 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
     const out = rewriteHtml(cheerio.load(html0), base, job.files);
     await fs.writeFile(path.join(siteDir, 'index.html'), out);
   }
-
   if (job.timedOut) warnings.push('⏱️ Time limit reached, so some files may be missing.');
   await writeInfoFiles(job, mode, first.finalUrl);
+  lap('assets', t);
 
+  t = Date.now();
   onStatus('🗜️ Creating ZIP…');
   const zipName = `${job.main.hostname.replace(/[^a-z0-9.-]/gi, '_')}.zip`;
   const zipPath = path.join(workDir, zipName);
   await zipDir(siteDir, zipPath);
   const { size } = await fs.stat(zipPath);
+  lap('zip', t);
   if (size > TG_MAX_BYTES)
     throw new UserError(`📦 The ZIP came out at ${mb(size)} MB, over Telegram's 50 MB limit. Try a lighter page.`, 'zip_too_big');
 
@@ -157,11 +179,13 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}) {
     zipPath,
     zipName,
     host: job.main.host,
+    title,
     fileCount: job.files.size + 1,
     zipBytes: size,
     mode,
     warnings,
     skipped: job.skipped.length,
     failed: job.failed.length,
+    timings,
   };
 }

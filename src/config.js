@@ -11,7 +11,7 @@ export const CFG = {
     .split(',').map((s) => s.trim()).filter(Boolean).map(Number),
   enableBrowser: process.env.ENABLE_BROWSER !== 'false',
   maxFileBytes: num('MAX_FILE_MB', 10) * MB,
-  maxTotalBytes: num('MAX_TOTAL_MB', 45) * MB,
+  maxTotalBytes: num('MAX_TOTAL_MB', 120) * MB,
   maxHtmlBytes: 8 * MB,
   maxFiles: num('MAX_FILES', 1500),
   jobTimeoutMs: num('JOB_TIMEOUT_SEC', 150) * 1000,
@@ -34,3 +34,5 @@ export const CFG = {
 
 // Telegram bots can upload up to 50 MB.
 export const TG_MAX_BYTES = 49 * MB;
+// Estimated ZIP size we aim for; anything above this is trimmed (largest media/images first).
+export const TG_TARGET_BYTES = 44 * MB;

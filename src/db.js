@@ -42,6 +42,9 @@ const MIGRATIONS = [
     WHERE status = 'ok' AND cached = false AND tg_file_id IS NOT NULL;
   CREATE INDEX downloads_created_idx ON downloads (created_at);
   `,
+  `
+  ALTER TABLE downloads ADD COLUMN title TEXT, ADD COLUMN timings JSONB;
+  `,
 ];
 
 export const enabled = () => pool !== null;
@@ -112,7 +115,7 @@ export async function touchUser(from) {
 
 export async function findFresh(urlKey, ttlSec) {
   const r = await q(
-    `SELECT tg_file_id, file_name, caption, host, mode, files, zip_bytes, url_key, created_at
+    `SELECT tg_file_id, file_name, caption, title, host, mode, files, zip_bytes, url_key, created_at
        FROM downloads
       WHERE url_key = $1 AND status = 'ok' AND cached = false AND tg_file_id IS NOT NULL
         AND created_at > now() - make_interval(secs => $2::int)
@@ -125,23 +128,29 @@ export async function findFresh(urlKey, ttlSec) {
 export async function record(d) {
   await q(
     `INSERT INTO downloads
-       (user_id, url, url_key, host, status, error_code, mode, cached, files, zip_bytes, duration_ms, tg_file_id, file_name, caption)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+       (user_id, url, url_key, host, status, error_code, mode, cached, files, zip_bytes, duration_ms, tg_file_id, file_name, caption, title, timings)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
     [d.userId, d.url, d.urlKey, d.host, d.status, d.errorCode || null, d.mode || null, !!d.cached,
-     d.files ?? null, d.zipBytes ?? null, d.durationMs ?? null, d.fileId || null, d.fileName || null, d.caption || null]
+     d.files ?? null, d.zipBytes ?? null, d.durationMs ?? null, d.fileId || null, d.fileName || null, d.caption || null,
+     d.title || null, d.timings ? JSON.stringify(d.timings) : null]
   );
 }
 
 export async function history(userId, limit = 8) {
   return (await q(
     `SELECT * FROM (
-       SELECT DISTINCT ON (url_key) id, host, tg_file_id, created_at
+       SELECT DISTINCT ON (url_key) id, host, title, tg_file_id, created_at
          FROM downloads
         WHERE user_id = $1 AND status = 'ok' AND tg_file_id IS NOT NULL
         ORDER BY url_key, created_at DESC
      ) t ORDER BY created_at DESC LIMIT $2`,
     [userId, limit]
   )) || [];
+}
+
+export async function isBanned(id) {
+  const r = await q('SELECT banned FROM users WHERE telegram_id = $1', [id]);
+  return !!r?.[0]?.banned;
 }
 
 export async function getDownload(id, userId) {
@@ -177,7 +186,18 @@ export async function stats() {
   if (!main) return null;
   const hosts = await q(`SELECT host, count(*) AS c FROM downloads WHERE created_at > now() - interval '7 days' GROUP BY host ORDER BY c DESC LIMIT 5`);
   const errors = await q(`SELECT COALESCE(error_code,'unknown') AS code, count(*) AS c FROM downloads WHERE status = 'failed' AND created_at > now() - interval '7 days' GROUP BY 1 ORDER BY c DESC LIMIT 5`);
-  return { ...main[0], hosts: hosts || [], errors: errors || [] };
+  const phases = await q(
+    `SELECT round(avg((timings->>'fetch')::numeric))::int   AS fetch,
+            round(avg((timings->>'browser')::numeric))::int AS browser,
+            round(avg((timings->>'assets')::numeric))::int  AS assets,
+            round(avg((timings->>'zip')::numeric))::int     AS zip,
+            round(avg((timings->>'upload')::numeric))::int  AS upload,
+            count(*) FILTER (WHERE mode = 'browser')        AS browser_jobs,
+            count(*)                                        AS jobs
+       FROM downloads
+      WHERE status = 'ok' AND NOT cached AND timings IS NOT NULL AND created_at > now() - interval '7 days'`
+  );
+  return { ...main[0], hosts: hosts || [], errors: errors || [], phases: phases?.[0] || null };
 }
 
 export function startRetention() {

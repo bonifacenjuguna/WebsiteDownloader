@@ -15,6 +15,8 @@ export class Job {
     this.totalBytes = 0;
     this.timedOut = false;
     this.deadline = Date.now() + CFG.jobTimeoutMs;
+    this.progress = { done: 0, total: 0 };
+    this.onProgress = null;
   }
 
   expired() {
@@ -31,7 +33,7 @@ export class Job {
       return null;
     }
     if (this.totalBytes + buf.length > CFG.maxTotalBytes) {
-      this.skipped.push({ url, reason: 'ZIP size budget reached', size: buf.length });
+      this.skipped.push({ url, reason: 'total size cap reached', size: buf.length });
       return null;
     }
     let local = localPathFor(url, this.main.host, type);

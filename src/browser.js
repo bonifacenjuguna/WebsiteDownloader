@@ -1,9 +1,13 @@
 import { CFG, mb } from './config.js';
 import { assertPublicHost } from './net.js';
 import { resolveUrl } from './extract.js';
+import { Semaphore } from './queue.js';
 
 const KEEP = new Set(['stylesheet', 'script', 'image', 'font', 'media', 'manifest']);
 const TRACKERS = /(^|\.)(google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com|googleadservices\.com|facebook\.net|hotjar\.com|clarity\.ms|segment\.io|segment\.com|mixpanel\.com|sentry\.io|intercom\.io|fullstory\.com|newrelic\.com|nr-data\.net)$/i;
+
+// Shared by downloads and previews so total parallel pages stay capped.
+export const browserSem = new Semaphore(CFG.browserConcurrency);
 
 // One long-lived Chromium; each job gets its own cheap, isolated context.
 let browser = null;
@@ -40,6 +44,20 @@ async function acquire() {
 export async function warmBrowser() { await ensure(); }
 export async function closeBrowser() { if (browser) await browser.close().catch(() => {}); browser = null; }
 
+// every request the browser makes goes through the SSRF check; trackers are dropped for speed
+async function guard(route) {
+  try {
+    const u = new URL(route.request().url());
+    if (u.protocol === 'data:' || u.protocol === 'blob:') return await route.continue();
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return await route.abort();
+    if (TRACKERS.test(u.hostname)) return await route.abort();
+    await assertPublicHost(u.hostname);
+    return await route.continue();
+  } catch {
+    return route.abort('blockedbyclient').catch(() => {});
+  }
+}
+
 async function autoScroll(page) {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
@@ -66,20 +84,7 @@ export async function renderWithBrowser(job, url) {
       viewport: { width: 1366, height: 900 },
       serviceWorkers: 'block',
     });
-
-    // every request the browser makes goes through the SSRF check; trackers are dropped for speed
-    await context.route('**/*', async (route) => {
-      try {
-        const u = new URL(route.request().url());
-        if (u.protocol === 'data:' || u.protocol === 'blob:') return await route.continue();
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') return await route.abort();
-        if (TRACKERS.test(u.hostname)) return await route.abort();
-        await assertPublicHost(u.hostname);
-        return await route.continue();
-      } catch {
-        return route.abort('blockedbyclient').catch(() => {});
-      }
-    });
+    await context.route('**/*', guard);
 
     const page = await context.newPage();
     const tasks = [];
@@ -127,6 +132,32 @@ export async function renderWithBrowser(job, url) {
       status: mainResp?.status() ?? 200,
       headers: new Headers(mainResp?.headers() ?? {}),
     };
+  } finally {
+    await context?.close().catch(() => {});
+    active--;
+  }
+}
+
+// Top-of-page JPEG of the LIVE site (small: ~100-250 KB). Not the downloaded copy.
+export async function screenshotPage(url) {
+  const b = await acquire();
+  let context;
+  try {
+    context = await b.newContext({
+      userAgent: CFG.ua,
+      viewport: { width: 1280, height: 800 },
+      serviceWorkers: 'block',
+    });
+    await context.route('**/*', guard);
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    } catch (e) {
+      if (!/timeout/i.test(String(e?.message))) throw e;
+    }
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    return await page.screenshot({ type: 'jpeg', quality: 72 });
   } finally {
     await context?.close().catch(() => {});
     active--;
