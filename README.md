@@ -1,2 +1,0 @@
-# WebsiteDownloader
-t.me/WebsiteDownloaderBot
