@@ -1,10 +1,13 @@
 import { CFG } from './config.js';
 
 // What people see BEFORE they press Start (empty chat screen), max 512 chars
-export const DESCRIPTION =
-  "Send me any website link and I'll send back a ZIP of its frontend (HTML, CSS, JS, images and fonts) that opens offline with one click on index.html. Works with JavaScript-heavy sites too, and I can show a live screenshot preview. Just paste a link like example.com.";
+export const DESCRIPTION = [
+  'Save any website for offline use. Send a link and get a ZIP with its pages, images, styles and scripts. Open index.html and it works without internet.',
+  '',
+  'Also: download whole sections and open folders, capture dynamic pages with browser mode, and preview a live page before you save it.',
+].join('\n');
 // Shown on the bot's profile page and in shared links, max 120 chars
-export const SHORT_DESCRIPTION = 'Turn any website into an offline ZIP. Send a link, unzip, open index.html.';
+export const SHORT_DESCRIPTION = 'Save websites for offline use: pages, assets, files and more.';
 
 // Only calls Telegram when the current value differs, so redeploys don't burn rate limits.
 async function ensure(tg, label, getMethod, setMethod, key, value) {

@@ -11,6 +11,7 @@ import { collectAssets, rewriteCssFiles, fetchAsset, pool } from './assets.js';
 import { trimToBudget } from './trim.js';
 import { zipEntries, zipDir } from './zip.js';
 import { fetchMain } from './downloader.js';
+import { STATUS, NOTES } from './copy.js';
 import {
   parseRobots, robotsAllows, pageKey, pageLocal, scopePathOf, pageLinksFromHrefs,
   isListingTitle, classifyListingHrefs, listingLocal, packParts, listingIndexHtml, escapeHtml,
@@ -63,7 +64,7 @@ export async function downloadSection(parsed, workDir, onStatus = () => {}) {
   await fs.mkdir(siteDir, { recursive: true });
 
   let t = Date.now();
-  onStatus(`🌐 Fetching ${parsed.url.host}…`);
+  onStatus(STATUS.opening(parsed.url.host));
   const first = await fetchMain(parsed.url, parsed.explicitScheme);
   timings.fetch = Date.now() - t;
 
@@ -121,7 +122,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
       continue;
     }
     scanned++;
-    onStatus(`📂 Scanning folders… (${scanned} folders, ${fileUrls.size} files)`);
+    onStatus(STATUS.folders(scanned, fileUrls.size));
     const { dirs, files } = classifyListingHrefs(hrefsOf($), d.url);
     for (const f of files) fileUrls.add(f);
     for (const sd of dirs) {
@@ -154,22 +155,22 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     const n = Date.now();
     if (n - lastEmit > 1200 && job.progress.done < job.progress.total) {
       lastEmit = n;
-      onStatus(`📥 Files ${job.progress.done}/${job.progress.total}…`);
+      onStatus(STATUS.files(job.progress.done, job.progress.total));
     }
   });
   timings.assets = Date.now() - t;
   if (!job.files.size)
-    throw new UserError(`📂 I couldn't download any files from that folder (each must be under ${mb(PART)} MB). See the reasons with a smaller folder.`, 'empty_listing');
+    throw new UserError(`📂 I couldn't download any files from that folder (each must be under ${mb(PART)} MB). See the reasons with a smaller folder.`, 'listing_unsavable');
 
   // 3) pack into Telegram-sized ZIP parts
   t = Date.now();
-  onStatus('🗜️ Creating ZIP…');
+  onStatus(STATUS.zip);
   const { bins, overflow } = packParts([...job.files.values()], PART, CFG.siteMaxParts);
   for (const f of overflow) {
     job.files.delete(f.url);
     job.skipped.push({ url: f.url, reason: `did not fit in ${CFG.siteMaxParts} ZIP parts`, size: f.size });
   }
-  if (overflow.length) warnings.push(`📦 ${overflow.length} file${overflow.length > 1 ? 's' : ''} didn't fit in ${CFG.siteMaxParts} ZIP parts (see skipped.txt).`);
+  if (overflow.length) warnings.push(NOTES.overflow(overflow.length));
 
   const n = bins.length;
   const skipText = skippedText(job);
@@ -197,7 +198,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     parts.push({ zipPath, zipName, bytes: size });
   }
   timings.zip = Date.now() - t;
-  if (job.timedOut) warnings.push('⏱️ Time limit reached, so the result is incomplete.');
+  if (job.timedOut) warnings.push(NOTES.slow);
 
   return {
     kind: 'listing', parts, host: job.main.host, title: rootPath,
@@ -246,7 +247,7 @@ async function runPages({ first, html0, workDir, siteDir, onStatus, timings, war
         if (new URL(got.finalUrl).host !== scope.host) { job.skipped.push({ url: got.finalUrl, reason: 'redirected to another site' }); return; }
         page = { key, base: got.finalUrl, html: got.html, local: pageLocal(key) };
         pages.set(key, page);
-        onStatus(`📄 Pages ${pages.size}/${accepted}…`);
+        onStatus(STATUS.pages(pages.size, accepted));
       }
       if (depth >= CFG.siteDepth) return;
       const $ = cheerio.load(page.html);
@@ -272,15 +273,15 @@ async function runPages({ first, html0, workDir, siteDir, onStatus, timings, war
 
   // download assets for all pages at once, then rewrite
   for (const p of pages.values()) job.used.add(p.local.toLowerCase());
-  onStatus('📦 Downloading assets…');
+  onStatus(STATUS.assets());
   let lastEmit = 0;
   job.onProgress = (done, total) => {
     const n = Date.now();
-    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(`📦 Downloading assets ${done}/${total}…`); }
+    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(STATUS.assets(done, total)); }
   };
   await collectAssets(job, [...pages.values()].map((p) => ({ html: p.html, base: p.base })));
   const trimmed = await trimToBudget(job);
-  if (trimmed) warnings.push(`✂️ ${trimmed} large file${trimmed > 1 ? 's were' : ' was'} left out to fit Telegram's 50 MB limit (see skipped.txt).`);
+  if (trimmed) warnings.push(NOTES.trimmed(trimmed));
   await rewriteCssFiles(job);
 
   const pageLookup = (abs) => {
@@ -307,9 +308,9 @@ async function runPages({ first, html0, workDir, siteDir, onStatus, timings, war
       `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escapeHtml(rel)}"><title>${escapeHtml(title || job.main.host)}</title><a href="${escapeHtml(rel)}">Open ${escapeHtml(job.main.host)}</a>\n`);
   }
 
-  if (pageLimitHit) warnings.push(`📄 More pages were found than the ${CFG.siteMaxPages}-page limit (see skipped.txt).`);
-  if (robotsBlocked) warnings.push(`🤖 ${robotsBlocked} page${robotsBlocked > 1 ? 's were' : ' was'} skipped because the site's robots.txt asks bots not to fetch them.`);
-  if (job.timedOut) warnings.push('⏱️ Time limit reached, so the result is incomplete.');
+  if (pageLimitHit) warnings.push(NOTES.pageLimit(CFG.siteMaxPages));
+  if (robotsBlocked) warnings.push(NOTES.robots(robotsBlocked));
+  if (job.timedOut) warnings.push(NOTES.slow);
 
   const skipText = skippedText(job);
   if (skipText) await fs.writeFile(path.join(siteDir, 'skipped.txt'), skipText);
@@ -321,14 +322,14 @@ async function runPages({ first, html0, workDir, siteDir, onStatus, timings, war
     '',
     'Notes:',
     `- ${pages.size} page${pages.size === 1 ? '' : 's'} saved. Links between saved pages work offline; links to anything else open the live site.`,
-    '- Links with query strings (?x=1) and non-page files like PDFs are not followed.',
+    "- Links with search filters and files like PDFs aren't followed.",
     '- If a page looks broken when opened directly, run "npx serve" inside this folder.',
     ...(skipText ? ['- See skipped.txt for pages and files that were left out.'] : []),
   ].join('\n') + '\n');
   timings.assets = Date.now() - t;
 
   t = Date.now();
-  onStatus('🗜️ Creating ZIP…');
+  onStatus(STATUS.zip);
   const zipName = `${hostFile(job)}-section.zip`;
   const zipPath = path.join(workDir, zipName);
   await zipDir(siteDir, zipPath);

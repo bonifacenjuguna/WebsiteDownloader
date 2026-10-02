@@ -11,6 +11,7 @@ import { collectAssets, rewriteCssFiles } from './assets.js';
 import { renderWithBrowser, browserSem } from './browser.js';
 import { trimToBudget } from './trim.js';
 import { zipDir } from './zip.js';
+import { STATUS, NOTES } from './copy.js';
 
 const cfMsg = (host) => `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors. I tried a real browser too and it didn't get through.`;
 
@@ -64,13 +65,13 @@ async function writeInfoFiles(job, mode, sourceUrl) {
     'HOW TO OPEN: double-click index.html',
     '',
     'Notes:',
-    '- Files that could not be downloaded keep their original online links.',
-    '- Live API calls, logins and server-side features are not included.',
-    '- If the page looks broken when opened directly, run "npx serve" inside this folder and open the address it prints.',
+    "- Anything that couldn't be saved still loads from the live site when you're online.",
+    "- Features that need the site's server (sign-ins, forms, live data) won't work offline.",
+    '- If a page looks off when opened directly, run "npx serve" in this folder and open the address it shows.',
     ...(mode === 'browser'
       ? [
-          '- index.html is a snapshot of the page after it finished rendering, with scripts removed so it opens reliably from disk.',
-          '- index.original.html keeps the site\'s original scripts. Serve this folder with "npx serve" and open index.original.html to run the real app.',
+          '- index.html is a snapshot of the page as it appears in a browser, so it opens with a double-click.',
+          "- index.original.html keeps the site's interactive features. Run \"npx serve\" in this folder and open it from the address shown.",
         ]
       : []),
     ...(lines.length ? ['- See skipped.txt for files that were left out.'] : []),
@@ -88,7 +89,7 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
   await fs.mkdir(siteDir, { recursive: true });
 
   let t = Date.now();
-  onStatus(`🌐 Fetching ${parsed.url.host}…`);
+  onStatus(STATUS.opening(parsed.url.host));
   const first = await fetchMain(parsed.url, parsed.explicitScheme);
   lap('fetch', t);
   const isHtml = !first.contentType || /html/i.test(first.contentType);
@@ -116,7 +117,7 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
   if (wantBrowser) {
     t = Date.now();
     try {
-      onStatus('🧭 Loading it in a headless browser…');
+      onStatus(STATUS.browser);
       rendered = await browserSem.run(() => renderWithBrowser(job, first.finalUrl));
       if (isChallengeHtml(rendered.html)) throw new UserError(cfMsg(job.main.host), 'cloudflare');
       mode = 'browser';
@@ -127,7 +128,7 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
       if (check.challenge) throw new UserError(cfMsg(job.main.host), 'cloudflare');
       if (opts.forceBrowser) throw new UserError('🧭 Browser mode failed on this site. Try again later, or send the link normally.', 'browser_failed');
       rendered = null;
-      warnings.push('⚠️ The headless browser failed, so I saved the static HTML only.');
+      warnings.push(NOTES.browserFallback);
     }
   } else if (check.challenge) {
     throw new UserError(check.fatal, 'cloudflare');
@@ -139,17 +140,17 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
   const title = cheerio.load(rendered ? rendered.html : html0)('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 80);
 
   t = Date.now();
-  onStatus('📦 Downloading assets…');
+  onStatus(STATUS.assets());
   let lastEmit = 0;
   job.onProgress = (done, total) => {
     const n = Date.now();
-    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(`📦 Downloading assets ${done}/${total}…`); }
+    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(STATUS.assets(done, total)); }
   };
   await collectAssets(job, docs, base);
 
   // too heavy for Telegram? drop the biggest media/images instead of failing
   const trimmed = await trimToBudget(job);
-  if (trimmed) warnings.push(`✂️ ${trimmed} large file${trimmed > 1 ? 's were' : ' was'} left out to fit Telegram's 50 MB limit (see skipped.txt).`);
+  if (trimmed) warnings.push(NOTES.trimmed(trimmed));
 
   await rewriteCssFiles(job);
   if (rendered) {
@@ -161,12 +162,12 @@ export async function downloadSite(parsed, workDir, onStatus = () => {}, opts = 
     const out = rewriteHtml(cheerio.load(html0), base, job.files);
     await fs.writeFile(path.join(siteDir, 'index.html'), out);
   }
-  if (job.timedOut) warnings.push('⏱️ Time limit reached, so some files may be missing.');
+  if (job.timedOut) warnings.push(NOTES.slow);
   await writeInfoFiles(job, mode, first.finalUrl);
   lap('assets', t);
 
   t = Date.now();
-  onStatus('🗜️ Creating ZIP…');
+  onStatus(STATUS.zip);
   const zipName = `${job.main.hostname.replace(/[^a-z0-9.-]/gi, '_')}.zip`;
   const zipPath = path.join(workDir, zipName);
   await zipDir(siteDir, zipPath);

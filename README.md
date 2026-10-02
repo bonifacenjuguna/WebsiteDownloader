@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.3.1
+# Website Downloader (@WebsiteDownloaderBot) v1.4.0
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline ZIP.
 Send `example.com` (any format) -> get a ZIP -> unzip -> open `index.html`.
@@ -66,3 +66,6 @@ On every start the bot makes sure its Telegram profile matches the code: descrip
 - **Pages:** same host only, inside the section path, up to `SITE_MAX_PAGES` (25) and `SITE_DEPTH` (2) levels. Links between saved pages work offline; everything else opens the live site. Links with `?query` and non-page files (PDF, images) are not followed. Needs server-rendered pages: JavaScript-built sites are refused with a hint to use `/browser`. Disallowed paths in `robots.txt` are skipped (turn off with `SITE_RESPECT_ROBOTS=false`).
 - **Folder listings:** up to `SITE_MAX_FILES` (300) files in `SITE_MAX_DIRS` (60) folders, `SITE_MAX_TOTAL_MB` (200) total, split into at most `SITE_MAX_PARTS` (4) ZIPs of about 43 MB. Files over ~43 MB cannot be sent by Telegram and are listed in `skipped.txt`. Unzip all parts into one folder.
 - Time limit `SITE_TIMEOUT_SEC` (300). Anything left out is listed in `skipped.txt` and flagged in the caption.
+
+## Editing the wording
+Everything users read is in `src/copy.js` (start text, progress messages, result captions, notes, errors, small messages and button rules), `src/help.js` (the /help guides) and `src/profile.js` (the bot's Telegram description). The backend keeps the precise error codes and technical details in logs and the database, so you can reword freely without losing diagnostics.

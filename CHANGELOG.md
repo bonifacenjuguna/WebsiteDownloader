@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 - UX refinement (no backend capability removed)
+Principle: complexity stays in the backend, clarity goes in the UI.
+- **One place for wording:** all user-facing text now lives in `src/copy.js` (plus `help.js` and `profile.js`). The backend still raises precise error codes and technical messages, which go to the logs and database; the UI translates them into short, human language. Edit `copy.js` to change any message.
+- **Cleaner results:** `✅ domain / 📝 title / 📦 files • size`, plus at most two short notes. Implementation labels ("fast mode") and the unzip instruction were dropped from results (the unzip steps are in /start, /help and the README inside every ZIP).
+- **Friendlier notes:** e.g. "This site loads much of its content after opening. Try browser mode for a closer copy." A couple of missing images is no longer reported; it is only mentioned when it is a meaningful share.
+- **Progressive disclosure:** buttons depend on the result. Fresh static site: 🖼 Preview. Dynamic site: 🧭 Browser mode + 🖼 Preview. Saved copy: 🔄 Fresh copy + 🖼 Preview.
+- **Failures offer one useful action, not diagnostics:** temporary problems get 🔁 Try again; a dynamic site that can't be saved as a section gets 🧭 Browser mode; permanent problems (not found, protected, sign-in) just explain. A failed attempt no longer starts the cooldown, so Try again works immediately.
+- **Human error messages** for every error code (not found, blocked, protected, rate limited, slow, certificate, sign-in, and more) with no HTTP codes or tool names.
+- **New /start** (a short product introduction), a **"What I can do"** menu grouped by what you can accomplish, rewritten help topics, status messages ("Opening…", "Collecting files… 42/118", "Packing your ZIP…"), and new bot description and short description.
+- Saved copies now show "⚡ Instant copy · saved 3h ago"; a result someone else just built looks like a normal fresh one.
+- Tests added: every backend error code has a human message; a vocabulary check keeps technical terms out of user-facing text; caption, button and failure-action rules.
+
 ## 1.3.1
 - **Interactive `/help`:** a menu of topic buttons (Download, Sections & folders, Browser mode, Previews, History, Limits, Troubleshooting, plus Admin for admins). Tapping a topic swaps the message in place; ◀ ▶ page through; 🏠 returns to the menu; ✖ closes it. Numbers (limits, caps, cache hours) are read from your config, so the help always matches the bot's real settings.
 - `/start` now shows a 📖 Help & guides button; `/help` added to the command menu.

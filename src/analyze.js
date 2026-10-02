@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { NOTES } from './copy.js';
 
 const CF_RE = /just a moment|cf-chl|challenge-platform|checking your browser|attention required! \| cloudflare|enable javascript and cookies to continue/i;
 const LOGIN_PATH = /\/(log-?in|sign-?in|signin|auth|sso|session\/new|accounts?\/login)(\/|$|\.|\?)/i;
@@ -25,9 +26,7 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
   const hasBody = isHtml && html.length > 400;
   if (status === 401 || status === 403) {
     if (hasBody) {
-      warnings.push(status === 401
-        ? '🔒 The site requires authentication (HTTP 401). I saved the page it served instead.'
-        : '🚫 The site answered "403 Forbidden". I saved the page it served instead.');
+      warnings.push(status === 401 ? NOTES.signIn : NOTES.restricted);
     } else {
       return {
         code: headers.get('www-authenticate') ? 'auth' : 'forbidden',
@@ -50,9 +49,9 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
   const reqPath = new URL(requestedUrl).pathname;
   const finPath = new URL(finalUrl).pathname;
   if (LOGIN_PATH.test(finPath) && !LOGIN_PATH.test(reqPath))
-    warnings.push("🔐 The site redirected to a login page. Content behind the login isn't downloadable, so I saved the login page itself.");
+    warnings.push(NOTES.signIn);
   else if (/<input[^>]+type\s*=\s*["']?password/i.test(html))
-    warnings.push("🔐 This page has a login form. Anything behind it isn't included.");
+    warnings.push(NOTES.signInForm);
 
   return { fatal: null, warnings };
 }
