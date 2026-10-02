@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.1
+- **Interactive `/help`:** a menu of topic buttons (Download, Sections & folders, Browser mode, Previews, History, Limits, Troubleshooting, plus Admin for admins). Tapping a topic swaps the message in place; ◀ ▶ page through; 🏠 returns to the menu; ✖ closes it. Numbers (limits, caps, cache hours) are read from your config, so the help always matches the bot's real settings.
+- `/start` now shows a 📖 Help & guides button; `/help` added to the command menu.
+
 ## 1.3.0
 - **`/site <url>`**, one command that detects what it is looking at:
   - **Open folder listing** ("Index of /files/"): walks the folders, downloads every file keeping the folder structure, and packs them into up to 4 Telegram-sized ZIP parts, each with a clickable `index.html`.

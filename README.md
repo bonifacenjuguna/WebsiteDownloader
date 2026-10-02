@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.3.0
+# Website Downloader (@WebsiteDownloaderBot) v1.3.1
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline ZIP.
 Send `example.com` (any format) -> get a ZIP -> unzip -> open `index.html`.
@@ -31,7 +31,7 @@ Postgres and Redis are optional: without them the bot still works (in-memory cac
 - Login/Cloudflare/403/404/5xx/DNS/SSL problems produce a clear message; login pages are still saved.
 
 ## Commands
-`/start` `/help` `/history` `/download <url>` `/site <url>` `/preview <url>` `/browser <url>` and, for admins, `/stats` `/ban <id>` `/unban <id>`.
+`/start` `/help` (interactive guides) `/history` `/download <url>` `/site <url>` `/preview <url>` `/browser <url>` and, for admins, `/stats` `/ban <id>` `/unban <id>`.
 
 - `/preview` sends a screenshot of the **live** site (top of page), cached for `CACHE_TTL_MIN`. Every result also has a 🖼 Preview button.
 - `/browser` forces headless mode and bypasses the cache; use it when a JS-heavy site came out empty.

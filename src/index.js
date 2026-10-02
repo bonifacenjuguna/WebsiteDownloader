@@ -13,6 +13,7 @@ import { assertPublicHost } from './net.js';
 import { warmBrowser, closeBrowser, screenshotPage, browserSem } from './browser.js';
 import { makeUpdater } from './updater.js';
 import { syncProfile } from './profile.js';
+import { renderMenu, renderPage } from './help.js';
 import * as db from './db.js';
 import { initStore, closeStore, cache, limits, previews, quota, kvMode } from './store.js';
 
@@ -38,6 +39,7 @@ const HELP = [
   'https://sub.example.co.ke',
   '',
   'Commands:',
+  '/help - guides, with buttons',
   '/preview <url> - screenshot of the live site',
   '/browser <url> - force browser mode (for JS-heavy sites that came out empty)',
   '/site <url> - save a whole section (e.g. example.com/docs) or every file of an open folder listing',
@@ -67,6 +69,10 @@ const keyboard = (key, { refresh, thin, section }) =>
     ...(thin ? [[Markup.button.callback('🧭 Retry in browser mode', `b:${key}`)]] : []),
   ]);
 
+// help.js returns plain {text, data} rows; turn them into Telegram buttons
+const toMarkup = (rows) => Markup.inlineKeyboard(rows.map((r) => r.map((b) => Markup.button.callback(b.text, b.data))));
+const helpExtra = (view) => ({ parse_mode: 'HTML', ...toMarkup(view.rows) });
+
 async function authorize(ctx) {
   if (isAdmin(ctx)) return true; // admins can never be locked out
   if (CFG.allowedUsers.length && !CFG.allowedUsers.includes(ctx.from.id)) {
@@ -81,8 +87,11 @@ async function authorize(ctx) {
 }
 
 // ---------- commands ----------
-bot.start((ctx) => ctx.reply(HELP));
-bot.help((ctx) => ctx.reply(HELP));
+bot.start((ctx) => ctx.reply(HELP, Markup.inlineKeyboard([[Markup.button.callback('📖 Help & guides', 'hp:m')]])));
+bot.help((ctx) => {
+  const view = renderMenu(isAdmin(ctx));
+  return ctx.reply(view.text, helpExtra(view));
+});
 
 bot.command('myid', (ctx) => ctx.reply(`Your Telegram ID: ${ctx.from.id}${isAdmin(ctx) ? '\n✅ You are an admin.' : ''}`));
 
@@ -158,6 +167,17 @@ for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
     await ctx.reply(ok ? `Done: ${id} ${flag ? 'banned' : 'unbanned'}.` : 'User not found (or Postgres is off).');
   });
 }
+
+// /help: topic buttons swap the message in place; ◀ ▶ page through; 🏠 menu; ✖ close
+bot.action(/^hp:(m|n|x|\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const arg = ctx.match[1];
+  if (arg === 'n') return;
+  if (arg === 'x') return ctx.deleteMessage().catch(() => {});
+  const admin = isAdmin(ctx);
+  const view = arg === 'm' ? renderMenu(admin) : renderPage(Number(arg), admin);
+  await ctx.editMessageText(view.text, helpExtra(view)).catch(() => {}); // "not modified" when the same page is tapped again
+});
 
 bot.action(/^h:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -431,6 +451,7 @@ async function main() {
 
   const commands = [
     { command: 'start', description: 'How to use the bot' },
+    { command: 'help', description: 'Guides and commands' },
     { command: 'preview', description: 'Screenshot of a live site: /preview example.com' },
     { command: 'browser', description: 'Force browser mode: /browser example.com' },
     { command: 'site', description: 'Save a section or folder: /site example.com/docs' },
