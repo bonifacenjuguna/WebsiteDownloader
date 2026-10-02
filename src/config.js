@@ -29,6 +29,18 @@ export const CFG = {
   retentionDays: num('RETENTION_DAYS', 90),
   // new (non-cached) downloads per user per UTC day; 0 = unlimited; admins are exempt
   dailyLimit: process.env.DAILY_LIMIT !== undefined && process.env.DAILY_LIMIT !== '' && Number(process.env.DAILY_LIMIT) >= 0 ? Number(process.env.DAILY_LIMIT) : 30,
+  // keep the bot's Telegram profile (description, short description, name, menu button) in sync on every start
+  profileSync: process.env.PROFILE_SYNC !== 'false',
+  botName: process.env.BOT_NAME || 'Website Downloader',
+  // /site: whole-section and folder-listing downloads
+  siteMaxPages: num('SITE_MAX_PAGES', 25),
+  siteDepth: num('SITE_DEPTH', 2),
+  siteMaxFiles: num('SITE_MAX_FILES', 300),
+  siteMaxDirs: num('SITE_MAX_DIRS', 60),
+  siteMaxTotalBytes: num('SITE_MAX_TOTAL_MB', 200) * MB,
+  siteMaxParts: num('SITE_MAX_PARTS', 4),
+  siteTimeoutMs: num('SITE_TIMEOUT_SEC', 300) * 1000,
+  siteRespectRobots: process.env.SITE_RESPECT_ROBOTS !== 'false',
   browserConcurrency: num('BROWSER_CONCURRENCY', 2),
   browserRecycleAfter: num('BROWSER_RECYCLE_AFTER', 40),
   ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',

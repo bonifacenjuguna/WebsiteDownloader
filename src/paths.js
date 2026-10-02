@@ -13,8 +13,8 @@ const MIME_EXT = {
 };
 
 export const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
-const clean = (s) => s.replace(/[<>:"\\|?*\x00-\x1f]/g, '_').replace(/^\.+$/, '_').slice(0, 120);
-const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
+export const clean = (s) => s.replace(/[<>:"\\|?*\x00-\x1f]/g, '_').replace(/^\.+$/, '_').slice(0, 120);
+export const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
 
 export function localPathFor(urlStr, mainHost, type = '') {
   const u = new URL(urlStr);

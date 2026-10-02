@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0
+- **`/site <url>`**, one command that detects what it is looking at:
+  - **Open folder listing** ("Index of /files/"): walks the folders, downloads every file keeping the folder structure, and packs them into up to 4 Telegram-sized ZIP parts, each with a clickable `index.html`.
+  - **A section of pages** (e.g. `example.com/docs`): follows same-site links under that path (default 25 pages, 2 levels deep), saves each page, and rewrites links between saved pages so they work offline. Assets are shared and downloaded once.
+- Respects `robots.txt` for pages it discovers (not for the page you asked for). Skips links with query strings, non-page files and off-site links.
+- Section results are cached, resendable from `/history`, multi-part aware, and have their own 🔄 Fresh copy button. One `/site` counts as one download toward the daily limit.
+- Per-job limits in the engine (files, bytes, timeout), so folder listings can allow big files and long runs without loosening single-page limits.
+- Tests: robots parsing, link scoping, packing, plus end-to-end runs for both modes against a mocked site.
+
+## 1.2.3
+- **Profile sync on startup:** the bot sets its own description (empty-chat "what can this bot do?" text), short description, display name and menu button through the Telegram API. It only calls Telegram when something differs, so redeploys are cheap. Disable with `PROFILE_SYNC=false`.
+
+## 1.2.2
+- Admins are exempt from the cooldown, the one-at-a-time lock, the daily quota and the preview wait.
+- Admins can never be banned (including by themselves) and bypass bans and `ALLOWED_USERS`, so they can't be locked out.
+
 ## 1.2.1
 - **Trim guard:** auto-trim never removes HTML, CSS, JS, JSON or SVG. If code alone is over Telegram's limit, the bot says so instead of sending a broken copy.
 - **Retry in browser mode:** results that look nearly empty (likely JavaScript-rendered) get a hint and a 🧭 button.

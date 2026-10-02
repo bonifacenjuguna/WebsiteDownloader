@@ -22,6 +22,9 @@ export function normalizeUrl(input) {
   return { url, explicitScheme };
 }
 
+// Cache key for /site results (different from the single-page key of the same URL)
+export const sectionKey = (key) => crypto.createHash('sha1').update(`${key}:site`).digest('hex');
+
 // Stable cache key: same site/path/query -> same key (scheme and trailing slash ignored)
 export function urlKey(url) {
   let p = url.pathname;

@@ -14,7 +14,7 @@ import { zipDir } from './zip.js';
 
 const cfMsg = (host) => `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors. I tried a real browser too and it didn't get through.`;
 
-async function fetchMain(url, explicitScheme) {
+export async function fetchMain(url, explicitScheme) {
   const attempt = async (u) => {
     const { res, url: finalUrl } = await safeFetch(u.href, {
       timeoutMs: 20000,

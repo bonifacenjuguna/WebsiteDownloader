@@ -4,7 +4,7 @@ import { CFG } from './config.js';
 import { localPathFor, sha1 } from './paths.js';
 
 export class Job {
-  constructor(dir, mainUrl) {
+  constructor(dir, mainUrl, limits = {}) {
     this.dir = dir;
     this.main = new URL(mainUrl);
     this.files = new Map();      // absolute url -> { url, local, type, size }
@@ -14,7 +14,12 @@ export class Job {
     this.failed = [];
     this.totalBytes = 0;
     this.timedOut = false;
-    this.deadline = Date.now() + CFG.jobTimeoutMs;
+    this.limits = {
+      maxFiles: CFG.maxFiles, maxTotalBytes: CFG.maxTotalBytes, maxFileBytes: CFG.maxFileBytes,
+      timeoutMs: CFG.jobTimeoutMs, fetchTimeoutMs: CFG.fetchTimeoutMs, ...limits,
+    };
+    this.localOverrides = new Map(); // url -> chosen path inside the ZIP
+    this.deadline = Date.now() + this.limits.timeoutMs;
     this.progress = { done: 0, total: 0 };
     this.onProgress = null;
   }
@@ -28,15 +33,15 @@ export class Job {
     this.attempted.add(url);
     const existing = this.files.get(url);
     if (existing) return existing;
-    if (this.files.size >= CFG.maxFiles) {
+    if (this.files.size >= this.limits.maxFiles) {
       this.skipped.push({ url, reason: 'file-count limit reached', size: buf.length });
       return null;
     }
-    if (this.totalBytes + buf.length > CFG.maxTotalBytes) {
+    if (this.totalBytes + buf.length > this.limits.maxTotalBytes) {
       this.skipped.push({ url, reason: 'total size cap reached', size: buf.length });
       return null;
     }
-    let local = localPathFor(url, this.main.host, type);
+    let local = this.localOverrides.get(url) || localPathFor(url, this.main.host, type);
     if (this.used.has(local.toLowerCase())) {
       const ext = path.posix.extname(local);
       local = `${local.slice(0, local.length - ext.length)}_${sha1(url).slice(0, 6)}${ext}`;

@@ -8,7 +8,7 @@ import { UserError } from './errors.js';
 
 const isCss = (f) => f.type === 'text/css' || /\.css$/i.test(f.local);
 
-async function pool(items, n, fn) {
+export async function pool(items, n, fn) {
   const q = [...items];
   await Promise.all(Array.from({ length: Math.min(n, q.length) }, async () => {
     while (q.length) await fn(q.shift());
@@ -24,7 +24,7 @@ export async function fetchAsset(job, url) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (job.expired()) return;
     try {
-      const { res } = await safeFetch(url, { headers: { referer: job.main.href, accept: '*/*' } });
+      const { res } = await safeFetch(url, { timeoutMs: job.limits.fetchTimeoutMs, headers: { referer: job.main.href, accept: '*/*' } });
       if (!res.ok) {
         res.body?.cancel().catch(() => {});
         if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
@@ -36,9 +36,9 @@ export async function fetchAsset(job, url) {
         return;
       }
       const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-      const body = await readBody(res, CFG.maxFileBytes);
+      const body = await readBody(res, job.limits.maxFileBytes);
       if (body.tooBig) {
-        job.skipped.push({ url, reason: `larger than ${mb(CFG.maxFileBytes)} MB`, size: body.size });
+        job.skipped.push({ url, reason: `larger than ${mb(job.limits.maxFileBytes)} MB`, size: body.size });
         return;
       }
       await job.add(url, body.buf, type);
@@ -63,9 +63,11 @@ async function runPool(job, list) {
 
 export async function collectAssets(job, htmlDocs, base) {
   const urls = new Set();
-  for (const html of htmlDocs) {
+  for (const doc of htmlDocs) {
+    const html = typeof doc === 'string' ? doc : doc.html;
+    const docBase = typeof doc === 'string' ? base : doc.base; // multi-page: every page has its own base URL
     const $ = cheerio.load(html);
-    for (const u of discover($, base)) urls.add(u);
+    for (const u of discover($, docBase)) urls.add(u);
   }
   await runPool(job, [...urls]);
 

@@ -96,13 +96,13 @@ export async function renderWithBrowser(job, url) {
           if (!key) return;
           const h = resp.headers();
           const len = Number(h['content-length'] || 0);
-          if (len > CFG.maxFileBytes) {
-            job.skipped.push({ url: key, reason: `larger than ${mb(CFG.maxFileBytes)} MB`, size: len });
+          if (len > job.limits.maxFileBytes) {
+            job.skipped.push({ url: key, reason: `larger than ${mb(job.limits.maxFileBytes)} MB`, size: len });
             return;
           }
           const buf = await resp.body();
-          if (buf.length > CFG.maxFileBytes) {
-            job.skipped.push({ url: key, reason: `larger than ${mb(CFG.maxFileBytes)} MB`, size: buf.length });
+          if (buf.length > job.limits.maxFileBytes) {
+            job.skipped.push({ url: key, reason: `larger than ${mb(job.limits.maxFileBytes)} MB`, size: buf.length });
             return;
           }
           await job.add(key, buf, (h['content-type'] || '').split(';')[0].trim().toLowerCase());

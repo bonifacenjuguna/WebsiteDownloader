@@ -102,12 +102,28 @@ function stripTrackers($, base) {
   $('style').each((_, el) => { if (/async-hide/.test($(el).text())) $(el).remove(); }); // A/B-test anti-flicker CSS
 }
 
-export function rewriteHtml($, base, map, { stripScripts = false } = {}) {
+// New href for a page link: relative if that page was saved too, otherwise the live absolute URL.
+export function rewriteLink(v, base, from, pageLookup) {
+  const t = String(v || '').trim();
+  if (!t || SKIP.test(t)) return null;
+  try {
+    const u = new URL(t, base);
+    if (pageLookup) {
+      const bare = new URL(u.href);
+      bare.hash = '';
+      const local = pageLookup(bare.href);
+      if (local) return relPath(from, local) + u.hash;
+    }
+    return u.href;
+  } catch { return null; }
+}
+
+export function rewriteHtml($, base, map, { stripScripts = false, from = FROM, pageLookup = null } = {}) {
   const swap = (v) => {
     const abs = resolveUrl(v, base);
     if (!abs) return v;
     const rec = map.get(abs);
-    return rec ? relPath(FROM, rec.local) : abs;
+    return rec ? relPath(from, rec.local) : abs;
   };
   stripTrackers($, base);
   for (const [el, a, kind] of assetRefs($)) {
@@ -117,17 +133,16 @@ export function rewriteHtml($, base, map, { stripScripts = false } = {}) {
       : swap(v);
     $(el).attr(a, out);
   }
-  $('style').each((_, el) => { $(el).text(rewriteCss($(el).text(), base, FROM, map)); });
-  $('[style]').each((_, el) => { $(el).attr('style', rewriteCss($(el).attr('style') || '', base, FROM, map)); });
+  $('style').each((_, el) => { $(el).text(rewriteCss($(el).text(), base, from, map)); });
+  $('[style]').each((_, el) => { $(el).attr('style', rewriteCss($(el).attr('style') || '', base, from, map)); });
 
-  // page links stay pointing at the live site
-  const absolutize = (sel, attr) => $(sel).each((_, el) => {
-    const v = ($(el).attr(attr) || '').trim();
-    if (!v || SKIP.test(v)) return;
-    try { $(el).attr(attr, new URL(v, base).href); } catch { /* ignore */ }
+  // page links stay pointing at the live site, unless the target page was saved too (/site)
+  const retarget = (sel, attr, lookup) => $(sel).each((_, el) => {
+    const out = rewriteLink($(el).attr(attr), base, from, lookup);
+    if (out) $(el).attr(attr, out);
   });
-  absolutize('a[href],area[href]', 'href');
-  absolutize('form[action]', 'action');
+  retarget('a[href],area[href]', 'href', pageLookup);
+  retarget('form[action]', 'action', null);
 
   // things that break when opened from disk
   $('base').remove();

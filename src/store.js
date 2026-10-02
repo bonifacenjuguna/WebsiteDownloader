@@ -102,7 +102,7 @@ export const cache = {
     if (!row) return null;
     const data = {
       urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
-      host: row.host, title: row.title, thin: (row.caption || '').includes('mostly empty'), mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
+      host: row.host, title: row.title, thin: (row.caption || '').includes('mostly empty'), section: (row.mode || '').startsWith('site-'), mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
       at: new Date(row.created_at).getTime(),
     };
     const left = data.at + CFG.cacheTtlMs - Date.now();
