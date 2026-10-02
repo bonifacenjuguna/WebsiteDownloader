@@ -2,9 +2,9 @@ import { CFG } from './config.js';
 
 // What people see BEFORE they press Start (empty chat screen), max 512 chars
 export const DESCRIPTION =
-  "Turn a website into a portable offline copy. Send a link and get a ZIP with its HTML, CSS, JavaScript, images and fonts, ready to open from index.html. Need a live look first? Get a screenshot preview. JavaScript-heavy sites can be handled with browser mode, while site mode can capture sections and folders. Paste a URL and let the downloader do the work.";
+  "Download websites as offline ZIPs with their HTML, CSS, JavaScript, images, fonts and other available frontend files. Send a URL for a fast download, use browser mode for JavaScript-heavy sites, preview a live page before downloading, or use site mode to capture sections and open folders. Files are packaged for easy offline use—just unzip and open index.html.";
 // Shown on the bot's profile page and in shared links, max 120 chars
-export const SHORT_DESCRIPTION = "Websites in. Offline ZIPs out. Download pages, assets, sections and more—ready to open locally.";
+export const SHORT_DESCRIPTION = "Download websites as offline ZIPs — pages, assets, sections and JavaScript-heavy sites, ready to open locally.";
 
 // Only calls Telegram when the current value differs, so redeploys don't burn rate limits.
 async function ensure(tg, label, getMethod, setMethod, key, value) {
