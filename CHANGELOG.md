@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0 - Whole-site downloads (one command, several ZIPs)
+- **Every link now saves the whole site**, not just one page. `example.com` crawls every reachable page; `example.com/docs` crawls that part. `/site` is gone from the menu and help (kept as a hidden alias).
+- **Locally wired:** pages saved as `folder/index.html`; links between pages, assets and linked documents (PDF, zip, office files, audio/video) point to relative paths.
+- **Multi-part ZIPs (~40 MB each, up to 12):** unzip them all into the same folder. Part 1 has `index.html`, `README.txt`, `skipped.txt`. Code and pages are packed first; if parts run out only media/images/documents are dropped. A part that lands over Telegram's limit is split automatically.
+- **Bigger files:** `MAX_FILE_MB` 10 -> 42. Big downloads are limited to 2 at a time to protect memory.
+- **JavaScript-built sites** are crawled page by page in Chromium (cap `SITE_MAX_PAGES_BROWSER`, 60) instead of being refused.
+- **Folder listings** are still detected automatically.
+- New defaults: `SITE_MAX_PAGES` 300, `SITE_DEPTH` 10, `SITE_MAX_PARTS` 12, `SITE_MAX_TOTAL_MB` 500, `SITE_TIMEOUT_SEC` 480. New `PART_MB` (40), `SITE_MAX_PAGES_BROWSER`.
+- Per-user busy lock now lasts 30 min (long crawls plus several uploads).
+- Whole-site results use their own cache key, so old single-page cache entries are not served.
+
 ## 1.4.0 - UX refinement (no backend capability removed)
 Principle: complexity stays in the backend, clarity goes in the UI.
 - **One place for wording:** all user-facing text now lives in `src/copy.js` (plus `help.js` and `profile.js`). The backend still raises precise error codes and technical messages, which go to the logs and database; the UI translates them into short, human language. Edit `copy.js` to change any message.

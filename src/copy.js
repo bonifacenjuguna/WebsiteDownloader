@@ -16,7 +16,7 @@ export const START_TEXT = [
   'Try it now. Just send a link like:',
   '<code>example.com</code>',
   '',
-  'Need more? Save whole sections or folders with /site, or tap Help to see everything I can do.',
+  'I save the whole site: every page, image and file, all linked together. Big sites arrive as several ZIPs (unzip them all into one folder). Tap Help to see everything I can do.',
 ].join('\n');
 
 // ---------------------------------------------------------------- progress
@@ -43,7 +43,7 @@ export const NOTES = {
   trimmed: (n) => `✂️ ${n} large ${plural(n, 'file was', 'files were')} left out to keep the ZIP within Telegram's size limit.`,
   slow: '⏱️ This site was slow to respond, so a few files may be missing.',
   browserFallback: '💡 Some dynamic content may be missing from this copy.',
-  pageLimit: (n) => `📄 This section has more pages than I can save at once, so I saved the first ${n}.`,
+  pageLimit: (n) => `📄 This site has more pages than I can save at once, so I saved the first ${n}.`,
   robots: (n) => `🤖 ${n} ${plural(n, 'page was', 'pages were')} skipped because the site asks bots not to copy ${plural(n, 'it', 'them')}.`,
   overflow: (n) => `📦 ${n} ${plural(n, 'file', 'files')} didn't fit in the ZIP parts and ${plural(n, 'was', 'were')} left out.`,
   missing: (n) => `📎 ${n} ${plural(n, 'file')} couldn't be included. Details are in skipped.txt.`,
@@ -81,10 +81,10 @@ export const previewCaption = (host) => `🖼 ${host}\nLive preview of the page 
 
 // ---------------------------------------------------------------- buttons (progressive disclosure)
 // Only offer what makes sense for this result: browser mode when the copy looks thin, a fresh copy when it is cached.
-export function actionsFor({ refresh = false, thin = false, section = false } = {}) {
+export function actionsFor({ refresh = false, thin = false } = {}) {
   const a = [];
-  if (thin && !section) a.push({ text: '🧭 Browser mode', cb: 'b' });
-  if (refresh) a.push({ text: '🔄 Fresh copy', cb: section ? 'rs' : 'r' });
+  if (thin) a.push({ text: '🧭 Browser mode', cb: 'b' });
+  if (refresh) a.push({ text: '🔄 Fresh copy', cb: 'r' });
   a.push({ text: '🖼 Preview', cb: 'p' });
   return a;
 }
@@ -113,7 +113,6 @@ export const ERRORS = {
   browser_failed: "🧭 I couldn't load this site in browser mode. Try again later.",
   browser_disabled: "🧭 Browser mode isn't available right now.",
   send_failed: "⚠️ I couldn't send the file. Please try again.",
-  spa_section: "🧭 This site loads its pages dynamically, so it can't be saved as a section. I can save the page itself in browser mode.",
   empty_listing: "📂 I couldn't find any files in that folder.",
   listing_unsavable: '📂 None of the files in that folder could be saved. They may be too large for Telegram.',
   queue_full: "🚦 I'm busy right now. Please try again in a minute.",
@@ -125,12 +124,12 @@ export const errorText = (code) => ERRORS[code] || ERRORS.internal;
 
 // worth offering "Try again" (the problem may be temporary)
 export const RETRY_CODES = new Set(['timeout', 'refused', 'reset', 'network', 'server_error', 'rate_limited', 'http_error', 'redirects', 'queue_full', 'send_failed', 'browser_failed']);
-export const BROWSER_CODES = new Set(['spa_section']);
+export const BROWSER_CODES = new Set();
 
 // the single most useful alternative for a failure, never a wall of options
-export function failureActions(code, section = false) {
+export function failureActions(code) {
   if (BROWSER_CODES.has(code)) return [{ text: '🧭 Browser mode', cb: 'b' }];
-  if (RETRY_CODES.has(code)) return [{ text: '🔁 Try again', cb: section ? 'rs' : 'r' }];
+  if (RETRY_CODES.has(code)) return [{ text: '🔁 Try again', cb: 'r' }];
   return [];
 }
 
@@ -147,7 +146,6 @@ export const MSG = {
   historyTitle: '📜 Your recent downloads\nTap one to get it again instantly.',
   fileGone: "That file isn't available anymore. Send the link again to get a fresh copy.",
   refreshLost: 'Send the link again to refresh it.',
-  refreshLostSite: 'Send the link again with /site to refresh it.',
   previewLost: 'Send the link again and tap 🖼 Preview.',
   browserLost: 'Send the link again with /browser to try it.',
   browserOff: "🧭 Browser mode isn't available right now.",
@@ -156,7 +154,6 @@ export const MSG = {
   previewFail: "🖼 I couldn't capture a preview of that page.",
   usageDownload: 'Send /download followed by a link, for example:\n/download example.com',
   usageBrowser: 'Send /browser followed by a link, for example:\n/browser example.com\n\nUse it when a saved copy comes out empty or incomplete.',
-  usageSite: 'Send /site followed by a link to save a whole section or a folder of files, for example:\n/site example.com/docs',
   usagePreview: 'Send /preview followed by a link, for example:\n/preview example.com',
   adminOnly: '🔒 This command is for admins only.',
   adminOff: "🔒 Admin commands aren't set up yet. The owner can enable them with ADMIN_IDS (send /myid to get your ID).",

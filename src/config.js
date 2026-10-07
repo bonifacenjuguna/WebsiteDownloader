@@ -10,7 +10,8 @@ export const CFG = {
   allowedUsers: (process.env.ALLOWED_USERS || '')
     .split(',').map((s) => s.trim()).filter(Boolean).map(Number),
   enableBrowser: process.env.ENABLE_BROWSER !== 'false',
-  maxFileBytes: num('MAX_FILE_MB', 10) * MB,
+  maxFileBytes: num('MAX_FILE_MB', 42) * MB,   // single files up to 42 MB (Telegram's hard cap is 50 MB)
+  partBytes: num('PART_MB', 40) * MB,          // target size of each ZIP part sent to Telegram
   maxTotalBytes: num('MAX_TOTAL_MB', 120) * MB,
   maxHtmlBytes: 8 * MB,
   maxFiles: num('MAX_FILES', 1500),
@@ -33,13 +34,14 @@ export const CFG = {
   profileSync: process.env.PROFILE_SYNC !== 'false',
   botName: process.env.BOT_NAME || 'Website Downloader',
   // /site: whole-section and folder-listing downloads
-  siteMaxPages: num('SITE_MAX_PAGES', 25),
-  siteDepth: num('SITE_DEPTH', 2),
-  siteMaxFiles: num('SITE_MAX_FILES', 300),
+  siteMaxPages: num('SITE_MAX_PAGES', 300),
+  siteMaxPagesBrowser: num('SITE_MAX_PAGES_BROWSER', 60), // JS-rendered sites: each page needs a real browser load
+  siteDepth: num('SITE_DEPTH', 10),
+  siteMaxFiles: num('SITE_MAX_FILES', 300),   // folder listings: files; whole sites: linked documents
   siteMaxDirs: num('SITE_MAX_DIRS', 60),
-  siteMaxTotalBytes: num('SITE_MAX_TOTAL_MB', 200) * MB,
-  siteMaxParts: num('SITE_MAX_PARTS', 4),
-  siteTimeoutMs: num('SITE_TIMEOUT_SEC', 300) * 1000,
+  siteMaxTotalBytes: num('SITE_MAX_TOTAL_MB', 500) * MB,
+  siteMaxParts: num('SITE_MAX_PARTS', 12),
+  siteTimeoutMs: num('SITE_TIMEOUT_SEC', 480) * 1000,
   siteRespectRobots: process.env.SITE_RESPECT_ROBOTS !== 'false',
   browserConcurrency: num('BROWSER_CONCURRENCY', 2),
   browserRecycleAfter: num('BROWSER_RECYCLE_AFTER', 40),

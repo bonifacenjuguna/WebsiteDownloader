@@ -5,6 +5,11 @@ import { CFG, mb } from './config.js';
 import { safeFetch, readBody } from './net.js';
 import { discover, cssRefs, rewriteCss } from './extract.js';
 import { UserError } from './errors.js';
+import { Semaphore } from './queue.js';
+
+// big files are buffered in memory while downloading: only a couple at a time (the bot shares ~1 GB with Chromium)
+const bigSem = new Semaphore(2);
+const BIG = 4 * 1024 * 1024;
 
 const isCss = (f) => f.type === 'text/css' || /\.css$/i.test(f.local);
 
@@ -36,7 +41,10 @@ export async function fetchAsset(job, url) {
         return;
       }
       const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-      const body = await readBody(res, job.limits.maxFileBytes);
+      const declared = Number(res.headers.get('content-length') || 0);
+      const body = declared > BIG
+        ? await bigSem.run(() => readBody(res, job.limits.maxFileBytes))
+        : await readBody(res, job.limits.maxFileBytes);
       if (body.tooBig) {
         job.skipped.push({ url, reason: `larger than ${mb(job.limits.maxFileBytes)} MB`, size: body.size });
         return;
@@ -61,8 +69,8 @@ async function runPool(job, list) {
   });
 }
 
-export async function collectAssets(job, htmlDocs, base) {
-  const urls = new Set();
+export async function collectAssets(job, htmlDocs, base, extraUrls = []) {
+  const urls = new Set(extraUrls);
   for (const doc of htmlDocs) {
     const html = typeof doc === 'string' ? doc : doc.html;
     const docBase = typeof doc === 'string' ? base : doc.base; // multi-page: every page has its own base URL

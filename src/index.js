@@ -5,8 +5,7 @@ import path from 'node:path';
 import { Telegraf, Markup } from 'telegraf';
 import { CFG, mb } from './config.js';
 import { normalizeUrl, urlKey, sectionKey } from './url.js';
-import { downloadSite } from './downloader.js';
-import { downloadSection } from './site.js';
+import { downloadWebsite } from './site.js';
 import { JobQueue } from './queue.js';
 import { UserError, explainNetError } from './errors.js';
 import { assertPublicHost } from './net.js';
@@ -45,8 +44,8 @@ const chunk2 = (arr) => { const out = []; for (let i = 0; i < arr.length; i += 2
 const buttons = (key, actions) => Markup.inlineKeyboard(chunk2(actions.map((a) => Markup.button.callback(a.text, `${a.cb}:${key}`))));
 const keyboard = (key, opts) => buttons(key, actionsFor(opts));
 // the one most useful alternative after a failure (Try again / Browser mode), or nothing
-const failureMarkup = (code, key, section) => {
-  const actions = failureActions(code, section);
+const failureMarkup = (code, key) => {
+  const actions = failureActions(code);
   return actions.length ? buttons(key, actions) : undefined;
 };
 
@@ -89,10 +88,11 @@ bot.command('browser', (ctx) => {
   handleRequest(ctx, arg, { force: true, forceBrowser: true }).catch(console.error);
 });
 
+// retired: every link is now saved as a whole site. Kept as a hidden alias so old habits and old buttons keep working.
 bot.command('site', (ctx) => {
   const arg = argOf(ctx);
-  if (!arg) return ctx.reply(MSG.usageSite);
-  handleRequest(ctx, arg, { section: true }).catch(console.error);
+  if (!arg) return ctx.reply(MSG.usageDownload);
+  handleRequest(ctx, arg).catch(console.error);
 });
 
 bot.command('preview', async (ctx) => {
@@ -166,24 +166,17 @@ bot.action(/^h:(\d+)$/, async (ctx) => {
   const row = await db.getDownload(ctx.match[1], ctx.from.id);
   if (!row?.tg_file_id) return ctx.reply(MSG.fileGone);
   const ok = await sendStored(ctx, {
-    fileId: row.tg_file_id, caption: row.caption || `✅ ${row.host}`, section: (row.mode || '').startsWith('site-'),
+    fileId: row.tg_file_id, caption: row.caption || `✅ ${row.host}`,
     at: new Date(row.created_at).getTime(), urlKey: row.url_key,
   }, 'history');
   if (!ok) await ctx.reply(MSG.fileGone);
 });
 
-bot.action(/^r:([a-f0-9]{40})$/, async (ctx) => {
+bot.action(/^rs?:([a-f0-9]{40})$/, async (ctx) => {
   await ctx.answerCbQuery('Getting a fresh copy…').catch(() => {});
   const url = await cache.urlFor(ctx.match[1]);
   if (!url) return ctx.reply(MSG.refreshLost);
   handleRequest(ctx, url, { force: true }).catch(console.error);
-});
-
-bot.action(/^rs:([a-f0-9]{40})$/, async (ctx) => {
-  await ctx.answerCbQuery('Getting a fresh copy…').catch(() => {});
-  const url = await cache.urlFor(ctx.match[1]);
-  if (!url) return ctx.reply(MSG.refreshLostSite);
-  handleRequest(ctx, url, { force: true, section: true }).catch(console.error);
 });
 
 bot.action(/^p:([a-f0-9]{40})$/, async (ctx) => {
@@ -251,7 +244,7 @@ async function sendStored(ctx, data, label) {
     for (let i = 0; i < ids.length; i++) {
       const extra = { caption: i === 0 ? `${data.caption}${footer}`.slice(0, 1000) : `📦 Part ${i + 1}/${ids.length}` };
       if (i === ids.length - 1 && data.urlKey)
-        Object.assign(extra, keyboard(data.urlKey, { refresh: label !== 'shared', thin: data.thin, section: data.section }));
+        Object.assign(extra, keyboard(data.urlKey, { refresh: label !== 'shared', thin: data.thin }));
       await ctx.replyWithDocument(ids[i], extra);
     }
     return true;
@@ -261,7 +254,7 @@ async function sendStored(ctx, data, label) {
   }
 }
 
-async function handleRequest(ctx, raw, { force = false, forceBrowser = false, section = false } = {}) {
+async function handleRequest(ctx, raw, { force = false, forceBrowser = false } = {}) {
   const uid = ctx.from.id;
   const admin = isAdmin(ctx);
   if (!admin && CFG.allowedUsers.length && !CFG.allowedUsers.includes(uid))
@@ -270,7 +263,8 @@ async function handleRequest(ctx, raw, { force = false, forceBrowser = false, se
   let parsed;
   try { parsed = normalizeUrl(raw); }
   catch (e) { return ctx.reply(errorText(codeOf(e))); }
-  const key = section ? sectionKey(urlKey(parsed.url)) : urlKey(parsed.url);
+  // one key family for whole-site results (the old single-page cache entries are intentionally not reused)
+  const key = sectionKey(urlKey(parsed.url));
   const base = { userId: uid, url: parsed.url.href, urlKey: key, host: parsed.url.host };
 
   // user check + both caches in parallel: one round-trip of latency, not three
@@ -291,7 +285,7 @@ async function handleRequest(ctx, raw, { force = false, forceBrowser = false, se
   if (neg) {
     cache.rememberUrl(key, parsed.url.href);
     const retry = RETRY_CODES.has(neg.code);
-    return ctx.reply(retry ? `${neg.message}\n\n${MSG.retrySoon}` : neg.message, failureMarkup(neg.code, key, section));
+    return ctx.reply(retry ? `${neg.message}\n\n${MSG.retrySoon}` : neg.message, failureMarkup(neg.code, key));
   }
 
   let held = false;
@@ -308,7 +302,7 @@ async function handleRequest(ctx, raw, { force = false, forceBrowser = false, se
           return ctx.reply(MSG.daily(CFG.dailyLimit));
       }
     }
-    ran = (await build(ctx, parsed, key, base, { forceBrowser, section })) !== false;
+    ran = (await build(ctx, parsed, key, base, { forceBrowser })) !== false;
   } finally {
     if (held) await limits.release(uid, ran);
   }
@@ -352,7 +346,7 @@ async function build(ctx, parsed, key, base, opts) {
     if (code === 'internal') console.error('job failed:', e);
     else console.warn(`[job] ${code} ${parsed.url.host}: ${e?.message}`);
     cache.rememberUrl(key, parsed.url.href); // lets the Try again / Browser mode buttons find the link
-    update(text, failureMarkup(code, key, !!opts.section));
+    update(text, failureMarkup(code, key));
     if (leader && e instanceof UserError) cache.setNegative(key, { message: text, code });
     await update.flush();
     db.record({ ...base, status: 'failed', errorCode: code, durationMs: Date.now() - started });
@@ -364,9 +358,7 @@ async function build(ctx, parsed, key, base, opts) {
 async function produce(ctx, parsed, key, update, opts) {
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wd-'));
   try {
-    const r = opts.section
-      ? await downloadSection(parsed, workDir, update)
-      : await downloadSite(parsed, workDir, update, opts);
+    const r = await downloadWebsite(parsed, workDir, update, opts);
     const parts = r.parts ?? [{ zipPath: r.zipPath, zipName: r.zipName }];
     const caption = buildCaption(r, parts.length);
     const tu = Date.now();
@@ -379,7 +371,7 @@ async function produce(ctx, parsed, key, update, opts) {
         { source: parts[i].zipPath, filename: parts[i].zipName },
         {
           caption: i === 0 ? caption : `📦 Part ${i + 1}/${parts.length} • ${r.host}`,
-          ...(last ? keyboard(key, { refresh: false, thin: r.thin, section: !!opts.section }) : {}),
+          ...(last ? keyboard(key, { refresh: false, thin: r.thin }) : {}),
         }
       );
       ids.push(msg.document.file_id);
@@ -387,7 +379,7 @@ async function produce(ctx, parsed, key, update, opts) {
     r.timings.upload = Date.now() - tu;
     const data = {
       urlKey: key, fileId: ids.join(','), fileName: parts[0].zipName, caption, title: r.title, thin: r.thin,
-      section: !!opts.section, host: r.host, mode: r.mode, files: r.fileCount, zipBytes: r.zipBytes,
+      host: r.host, mode: r.mode, files: r.fileCount, zipBytes: r.zipBytes,
       at: Date.now(), timings: r.timings,
     };
     await Promise.all([cache.setResult(key, data), cache.rememberUrl(key, parsed.url.href)]);
@@ -412,8 +404,7 @@ async function main() {
     { command: 'start', description: 'Welcome and quick start' },
     { command: 'help', description: 'What I can do, with guides' },
     { command: 'preview', description: 'Preview a live page: /preview example.com' },
-    { command: 'browser', description: 'Capture a dynamic page: /browser example.com' },
-    { command: 'site', description: 'Save a section or folder: /site example.com/docs' },
+    { command: 'browser', description: 'Capture a dynamic site: /browser example.com' },
     { command: 'history', description: 'Your recent downloads' },
     { command: 'download', description: 'Save a website: /download example.com' },
     { command: 'myid', description: 'Show your Telegram ID' },

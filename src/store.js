@@ -120,7 +120,7 @@ export const cache = {
 };
 
 export const limits = {
-  tryAcquire: (uid) => kv.setNx(`busy:${uid}`, '1', 5 * 60 * 1000),
+  tryAcquire: (uid) => kv.setNx(`busy:${uid}`, '1', 30 * 60 * 1000), // long crawls + several uploads
   async cooldownLeft(uid) { const t = await kv.pttl(`cd:${uid}`); return t > 0 ? t : 0; },
   async release(uid, ran) {
     await kv.del(`busy:${uid}`);

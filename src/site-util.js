@@ -136,6 +136,39 @@ export function packParts(files, capacity, maxParts) {
   return { bins, overflow };
 }
 
+// Packs files into ZIP parts. Highest rank (code/pages) is placed first, so when parts run out it is
+// media that gets left out, never code. A file bigger than one part simply gets a part of its own.
+export function packPrioritized(files, { capacity, maxParts, weigh, rankOf, pinned = [] }) {
+  const bins = [{ files: [...pinned], bytes: pinned.reduce((n, f) => n + weigh(f), 0) }];
+  const overflow = [];
+  const ordered = [...files].sort((a, b) => rankOf(b) - rankOf(a) || weigh(b) - weigh(a));
+  for (const f of ordered) {
+    const w = weigh(f);
+    let bin = bins.find((b) => b.bytes + w <= capacity);
+    if (!bin) {
+      if (bins.length >= maxParts) { overflow.push(f); continue; }
+      bin = { files: [], bytes: 0 };
+      bins.push(bin);
+    }
+    bin.files.push(f);
+    bin.bytes += w;
+  }
+  return { bins: bins.filter((b) => b.files.length), overflow };
+}
+
+// documents and media linked from pages (PDFs, archives, ...): same host, no query string
+const DOC_EXT = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|csv|txt|zip|gz|tgz|7z|rar|epub|mp3|m4a|wav|ogg|mp4|webm|mov)$/i;
+export function fileLinksFromHrefs(hrefs, base, host) {
+  const out = new Set();
+  for (const h of hrefs) {
+    const abs = resolveUrl(h, base);
+    if (!abs) continue;
+    const u = new URL(abs);
+    if (u.host === host && !u.search && DOC_EXT.test(u.pathname)) out.add(u.href);
+  }
+  return out;
+}
+
 export const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 export function listingIndexHtml(host, rootPath, files, part, parts, sizeLabel) {
