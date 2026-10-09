@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.6.0
+# Website Downloader (@WebsiteDownloaderBot) v1.6.1
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -39,7 +39,7 @@ Postgres and Redis are optional: without them the bot still works (in-memory cac
 
 ## Commands
 Menu: `/start` `/help` `/history` `/privacy`. Also work when typed: `/download <url>`, `/preview <url>`, `/language`, `/myid`.
-Admins: `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unblock <domain>`, `/block` (list).
+Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unblock <domain>`, `/block` (list).
 
 - Any message containing a link works. Tracking parameters (`utm_*`, `fbclid`, ...) are removed. With several links the first is saved.
 - `/history`: tap to resend, ✖ to remove one, 🗑 to clear all. `/privacy`: auto-delete (7 days / 30 days / never / default) and delete all your data.
@@ -49,6 +49,9 @@ Admins: `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unblock <doma
 - There is no `/browser` command: browser use is decided automatically.
 
 ## Health and alerts
+- **Deploy awareness:** admins get a DM when the bot comes online (version, time, Redis / Postgres / Chromium state, resumed jobs) and when it shuts down. `ADMIN_NOTIFY=false` turns this off. The admin must have started the bot once (`/start`) so Telegram allows it to message them.
+- **`/ping`** (admins): Telegram round trip, version, uptime, memory, Redis/Postgres latency, Chromium and queue state.
+- **Command menu:** on every start the bot syncs Telegram's menu to the code, removing stale commands in every scope and language.
 - `GET /health` (on `$PORT`) returns queue, Redis/Postgres state, browser stats and memory. Set `HEALTH=false` to disable.
 - Chromium is recycled when the container uses more than `BROWSER_MEM_RATIO` (0.85) of its memory limit (only while idle).
 - Admins get a message when the failure rate of the bot's own jobs spikes, or when Chromium cannot start (at most once an hour per topic).

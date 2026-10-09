@@ -142,6 +142,7 @@ const TOPICS = [
     pages: () => [[
       '<b>Admin tools</b>',
       '• <code>/myid</code>: your Telegram ID',
+      '• <code>/ping</code>: is it alive? uptime, memory and speed',
       '• <code>/stats</code>: usage, speed and common problems',
       '• <code>/ban &lt;id&gt;</code> and <code>/unban &lt;id&gt;</code>',
       '',

@@ -15,12 +15,14 @@ import { syncProfile } from './profile.js';
 import { renderMenu, renderPage } from './help.js';
 import { tr, LANGS, mapLang, buildSummary, codeOf } from './copy.js';
 import * as db from './db.js';
-import { initStore, closeStore, cache, limits, previews, quota, lang as langStore, kvMode } from './store.js';
+import { initStore, closeStore, cache, limits, previews, quota, lang as langStore, kvMode, kv } from './store.js';
 import * as policy from './policy.js';
 import * as fingerprint from './fingerprint.js';
 import * as resume from './resume.js';
 import { startHealth } from './health.js';
 import { setNotifier, recordJob } from './alerts.js';
+import { syncCommands } from './commands.js';
+import { memoryShare, memoryMb } from './health-util.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -34,6 +36,7 @@ const queue = new JobQueue(CFG.queueConcurrency, CFG.queueMaxWaiting);
 // flight key -> { promise, controller, members: Map<userId, member> }: identical requests share one build
 const flights = new Map();
 let stopping = false;
+const startedAt = Date.now();
 
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
 const argOf = (ctx) => ctx.message.text.split(/\s+/)[1];
@@ -260,6 +263,35 @@ for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
     await ctx.reply(ok ? `Done: ${id} ${flag ? 'banned' : 'unbanned'}.` : 'User not found (or Postgres is off).');
   });
 }
+
+const fmtUptime = (ms) => {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400); const h = Math.floor((s % 86400) / 3600); const m = Math.floor((s % 3600) / 60);
+  return `${d ? `${d}d ` : ''}${d || h ? `${h}h ` : ''}${m}m ${s % 60}s`;
+};
+const utc = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+const timeIt = async (fn) => { const t = Date.now(); try { await fn(); return `${Date.now() - t} ms`; } catch { return 'error'; } };
+
+// Is it alive, how long has it been up, how fast are its parts? (admins only)
+bot.command('ping', async (ctx) => {
+  if (!isAdmin(ctx)) return denyAdmin(ctx);
+  const t0 = Date.now();
+  const m = await ctx.reply('🏓 …');
+  const tg = Date.now() - t0; // a full round trip to Telegram
+  const [redis, pg] = await Promise.all([timeIt(() => kv.get('ping')), db.enabled() ? timeIt(() => db.ping()) : Promise.resolve('off')]);
+  const b = browserStats();
+  const share = memoryShare();
+  const lines = [
+    `🏓 Pong • Telegram ${tg} ms`,
+    `🟢 v${pkg.version} • Node ${process.versions.node}`,
+    `⏱ Up ${fmtUptime(Date.now() - startedAt)} (since ${utc(startedAt)})`,
+    `💾 ${memoryMb()} MB${share == null ? '' : ` • container ${Math.round(share * 100)}%`}`,
+    `🗄 Redis (${kvMode}) ${redis} • Postgres ${pg}`,
+    `🧭 Chromium ${b.up ? 'up' : 'idle'} • ${b.active} active • ${b.served} served • ${b.crashes} crashes`,
+    `🚦 Queue ${queue.active} active, ${queue.waiting.length} waiting • ${flights.size} in flight`,
+  ];
+  await ctx.telegram.editMessageText(ctx.chat.id, m.message_id, undefined, lines.join('\n')).catch(() => ctx.reply(lines.join('\n')));
+});
 
 bot.command('block', async (ctx) => {
   if (!isAdmin(ctx)) return denyAdmin(ctx);
@@ -604,7 +636,7 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
 // ---------- resume jobs that a restart cut off ----------
 async function resumeJobs() {
   const list = await resume.unfinished();
-  if (!list.length) return;
+  if (!list.length) return 0;
   console.log(`Resuming ${list.length} unfinished job(s) from before the restart`);
   for (const j of list) {
     const ctx = resume.makeContext(bot.telegram, j);
@@ -618,6 +650,30 @@ async function resumeJobs() {
     }
     handleRequest(ctx, j.url, { resumed: true, rec: { ...j, attempts: (j.attempts || 0) + 1 } }).catch((e) => console.error('resume failed:', e?.message));
   }
+  return list.filter((j) => !j.expired).length;
+}
+
+// ---------- telling admins what the bot is doing ----------
+async function notifyAdmins(text) {
+  if (!CFG.adminNotify) return;
+  for (const id of CFG.adminIds) await bot.telegram.sendMessage(id, text).catch(() => {});
+}
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "I'm online": version, what is connected, and how many interrupted jobs were picked up again
+async function announceStartup(warm, resumed) {
+  if (!CFG.adminNotify || !CFG.adminIds.length) return;
+  if (!(await kv.setNx('boot-notice', '1', 20_000))) return; // a crash loop must not spam admins
+  const chromium = CFG.enableBrowser ? ((await Promise.race([warm, sleepMs(25_000).then(() => 'slow')])) === true ? '✅' : '⚠️ not ready') : 'off';
+  let username = '';
+  try { username = ` @${(await bot.telegram.getMe()).username}`; } catch { /* still online */ }
+  await notifyAdmins([
+    `🟢 Website Downloader v${pkg.version} is online${username}`,
+    `🕒 ${utc(Date.now())}`,
+    `🗄 Redis: ${kvMode === 'redis' ? '✅' : '⚠️ memory only'} • Postgres: ${db.enabled() ? '✅' : '⚠️ off'} • Chromium: ${chromium}`,
+    ...(resumed ? [`🔄 Resuming ${resumed} interrupted job${resumed === 1 ? '' : 's'}`] : []),
+    'Send /ping for live health.',
+  ].join('\n'));
 }
 
 // ---------- lifecycle ----------
@@ -631,12 +687,14 @@ async function main() {
   db.startRetention();
   const blockedCount = await policy.loadBlocked();
   if (blockedCount) console.log(`Blocked domains: ${blockedCount}`);
-  setNotifier(async (text) => { for (const id of CFG.adminIds) await bot.telegram.sendMessage(id, text).catch(() => {}); });
+  setNotifier((text) => notifyAdmins(text));
   startHealth(() => ({
     version: pkg.version, stopping, queue: { active: queue.active, waiting: queue.waiting.length, flights: flights.size },
     redis: kvMode, postgres: db.enabled(),
   }));
-  if (CFG.enableBrowser) warmBrowser().then(() => console.log('Chromium warmed up')).catch((e) => console.error('Chromium warm-up failed:', e.message));
+  const warm = CFG.enableBrowser
+    ? warmBrowser().then(() => { console.log('Chromium warmed up'); return true; }).catch((e) => { console.error('Chromium warm-up failed:', e.message); return false; })
+    : Promise.resolve(false);
 
   // the menu stays short; everything else still works when typed
   const commands = [
@@ -645,36 +703,34 @@ async function main() {
     { command: 'history', description: 'Your recent downloads' },
     { command: 'privacy', description: 'Your data and auto-delete' },
   ];
-  bot.telegram.setMyCommands(commands).catch(() => {});
-  if (CFG.adminIds.length) {
-    const adminCommands = [
-      ...commands,
-      { command: 'stats', description: 'Admin: usage, speed and errors' },
-      { command: 'ban', description: 'Admin: /ban <telegram_id>' },
-      { command: 'unban', description: 'Admin: /unban <telegram_id>' },
-      { command: 'block', description: 'Admin: /block domain.com (list without a domain)' },
-      { command: 'unblock', description: 'Admin: /unblock domain.com' },
-    ];
-    for (const id of CFG.adminIds) {
-      // admins see the extra commands in their own menu (works once they have messaged the bot)
-      bot.telegram.setMyCommands(adminCommands, { scope: { type: 'chat', chat_id: id } }).catch(() => {});
-    }
-    console.log(`Admins: ${CFG.adminIds.join(', ')}`);
-  } else {
-    console.log('ADMIN_IDS not set: /stats, /ban, /block are disabled. Message the bot /myid to get your ID.');
-  }
+  const adminCommands = [
+    ...commands,
+    { command: 'ping', description: 'Admin: is it alive? uptime and speed' },
+    { command: 'stats', description: 'Admin: usage, speed and errors' },
+    { command: 'ban', description: 'Admin: /ban <telegram_id>' },
+    { command: 'unban', description: 'Admin: /unban <telegram_id>' },
+    { command: 'block', description: 'Admin: /block domain.com (list without a domain)' },
+    { command: 'unblock', description: 'Admin: /unblock domain.com' },
+  ];
+  // makes Telegram's menu match the code exactly, including removing commands registered earlier (e.g. /browser)
+  syncCommands(bot.telegram, { commands, adminCommands, adminIds: CFG.adminIds }).catch((e) => console.error('Commands sync failed:', e?.message));
+  if (CFG.adminIds.length) console.log(`Admins: ${CFG.adminIds.join(', ')}`);
+  else console.log('ADMIN_IDS not set: /ping, /stats, /ban, /block are disabled. Message the bot /myid to get your ID.');
 
   syncProfile(bot.telegram).catch((e) => console.error('Profile sync failed:', e?.message));
 
   bot.launch({ dropPendingUpdates: true }).catch((e) => { console.error(e); process.exit(1); });
   console.log('Website Downloader (@WebsiteDownloaderBot) is running.');
-  resumeJobs().catch((e) => console.error('resume error:', e?.message));
+  const resumed = await resumeJobs().catch((e) => { console.error('resume error:', e?.message); return 0; });
+  announceStartup(warm, resumed).catch((e) => console.warn('startup notice failed:', e?.message));
 }
 
 async function shutdown(sig) {
   if (stopping) return;
   stopping = true;
   setTimeout(() => process.exit(0), 8000).unref();
+  // tell admins before going quiet (deploys send SIGTERM); jobs in flight are picked up again by the next start
+  await Promise.race([notifyAdmins(`🔴 Website Downloader v${pkg.version} is shutting down (${sig}) after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`), sleepMs(3000)]);
   try { bot.stop(sig); } catch { /* not started */ }
   await Promise.allSettled([closeBrowser(), closeStore(), db.shutdown()]);
   process.exit(0);

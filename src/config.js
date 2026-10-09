@@ -65,6 +65,7 @@ export const CFG = {
   failStrikes: num('FAIL_STRIKES', 8),                        // failed attempts per hour before a short pause
   failPauseMs: num('FAIL_PAUSE_MIN', 15) * 60 * 1000,
   blockedDomains: list('BLOCKED_DOMAINS'),
+  adminNotify: process.env.ADMIN_NOTIFY !== 'false',        // DM admins on every start and shutdown
   healthPort: Number(process.env.PORT || process.env.HEALTH_PORT || 0) || 0,
   healthEnabled: process.env.HEALTH !== 'false',
   memRecycleRatio: Number(process.env.BROWSER_MEM_RATIO) > 0 ? Number(process.env.BROWSER_MEM_RATIO) : 0.85, // recycle Chromium above this share of the container memory

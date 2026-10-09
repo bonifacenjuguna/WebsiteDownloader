@@ -110,6 +110,9 @@ export async function init() {
   }
 }
 
+// round-trip check for /ping
+export async function ping() { return (await q('SELECT 1 AS ok'))?.[0]?.ok === 1; }
+
 export async function shutdown() { if (pool) await pool.end().catch(() => {}); }
 
 export async function touchUser(from) {

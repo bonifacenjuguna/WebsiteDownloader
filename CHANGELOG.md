@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.1 - Clean command menu, admin visibility
+- **Command menu fixed for good:** Telegram keeps command lists per scope and per language, so `/browser` could survive in a list registered earlier (by an old version or in @BotFather). On every start the bot now makes the menu match the code: sets the default list, deletes stale lists in every other scope and language, and sets each admin's own menu. The log line `Commands sync -> ...` shows what it did. Telegram apps cache menus, so close and reopen the chat once.
+- **Admins now know what the bot is doing:** a message when the bot comes online (version, time, Redis / Postgres / Chromium state, interrupted jobs being resumed) and one when it shuts down (deploys). Rapid restarts are rate-limited so a crash loop cannot spam. `ADMIN_NOTIFY=false` turns both off.
+- **`/ping` (admins):** Telegram round-trip time, version, uptime and start time, memory, Redis and Postgres latency, Chromium state, queue and jobs in flight. Also in the admin menu.
+- Test added for the menu sync (stale lists removed, nothing written when already correct).
+
 ## 1.6.0 - Smarter backend, simpler UI
 Principle: every decision is automatic, and people only see outcomes.
 
