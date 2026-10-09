@@ -4,7 +4,7 @@ import { CFG } from './config.js';
 export const DESCRIPTION = [
   'Save any website for offline use. Send a link and get a ZIP with its pages, images, styles and scripts. Open index.html and it works without internet.',
   '',
-  'Whole sites, not just one page: every page, image and file is saved and linked so it works offline. Big sites arrive as several ZIPs. Also: open folders, dynamic sites, and live previews.',
+  'Whole sites, not just one page: every page, image and file is saved and linked so it works offline. Big sites arrive as several ZIPs. Also: open folders, dynamic and protected sites, and live previews.',
 ].join('\n');
 // Shown on the bot's profile page and in shared links, max 120 chars
 export const SHORT_DESCRIPTION = 'Save entire websites for offline use: every page, image and file.';

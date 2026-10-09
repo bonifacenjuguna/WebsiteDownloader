@@ -1,44 +1,31 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import * as cheerio from 'cheerio';
 import { CFG, MB, TG_MAX_BYTES, mb } from './config.js';
 import { UserError } from './errors.js';
 import { safeFetch, readBody } from './net.js';
 import { Job } from './job.js';
-import { analyze, looksLikeSpa, isChallengeHtml } from './analyze.js';
+import { analyze, looksLikeSpa, looksThin, isChallengeHtml, isBotWallHtml, visibleTextLength, LOGIN_PATH } from './analyze.js';
 import { decodeBody, rewriteHtml, relPath } from './extract.js';
 import { collectAssets, rewriteCssFiles, fetchAsset, pool } from './assets.js';
 import { rank, estimate } from './trim.js';
 import { renderWithBrowser, browserSem } from './browser.js';
 import { zipEntries } from './zip.js';
-import { fetchMain } from './downloader.js';
-import { STATUS, NOTES } from './copy.js';
+import { fetchMain, fetchHtml } from './fetcher.js';
+import { tr } from './copy.js';
+import { compressImages } from './compress.js';
+import { checkLinks } from './checks.js';
+import { hashOf } from './fingerprint.js';
 import {
-  parseRobots, robotsAllows, pageKey, pageLocal, scopePathOf, pageLinksFromHrefs,
+  parseRobots, robotsAllows, pageKey, pageLocal, scopePathOf, pageLinksFromHrefs, sitemapsFromRobots, parseSitemapXml, sortShallowFirst,
   isListingTitle, classifyListingHrefs, listingLocal, packParts, packPrioritized, fileLinksFromHrefs, listingIndexHtml, escapeHtml,
 } from './site-util.js';
 
 const hrefsOf = ($) => { const out = []; $('a[href]').each((_, el) => out.push($(el).attr('href'))); return out; };
 const titleOf = (html) => cheerio.load(html)('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 80);
-
-async function fetchHtml(url) {
-  try {
-    const { res, url: finalUrl } = await safeFetch(url, {
-      timeoutMs: 20000,
-      headers: { accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8' },
-    });
-    const type = res.headers.get('content-type') || '';
-    if (!res.ok || (type && !/html/i.test(type))) {
-      res.body?.cancel().catch(() => {});
-      return { fail: res.ok ? 'not an HTML page' : `HTTP ${res.status}` };
-    }
-    const body = await readBody(res, CFG.maxHtmlBytes);
-    if (body.tooBig) return { fail: 'page too large' };
-    return { html: decodeBody(body.buf, type), finalUrl: finalUrl.href };
-  } catch (e) {
-    return { fail: e?.message || 'error' };
-  }
-}
+const bytesOf = (str) => Buffer.byteLength(str, 'utf8');
+const hostFile = (job) => job.main.hostname.replace(/[^a-z0-9.-]/gi, '_');
 
 function skippedText(job) {
   const lines = [];
@@ -50,27 +37,57 @@ function skippedText(job) {
     for (const i of items.slice(0, cap)) lines.push(`  ${fmt(i)}`);
     if (items.length > cap) lines.push(`  ...and ${items.length - cap} more`);
   };
-  block('SKIPPED (limits, size or robots.txt):', job.skipped, (s) => `${s.url} - ${s.reason}${s.size ? ` (${mb(s.size)} MB)` : ''}`);
+  block('SKIPPED (limits, size, robots.txt or sign-in):', job.skipped, (s) => `${s.url} - ${s.reason}${s.size ? ` (${mb(s.size)} MB)` : ''}`);
   block('COULD NOT BE DOWNLOADED:', job.failed, (f) => `${f.url} - ${f.reason}`);
   if (job.timedOut) lines.push('', 'NOTE: the time limit was reached, so the result is incomplete.');
   return lines.length ? `${lines.join('\n')}\n` : '';
 }
 
-const hostFile = (job) => job.main.hostname.replace(/[^a-z0-9.-]/gi, '_');
+// a small text resource (robots.txt, sitemap.xml); .gz sitemaps are unpacked; failures just return ''
+async function fetchText(url, timeoutMs, maxBytes, signal) {
+  try {
+    const { res } = await safeFetch(url, { timeoutMs, signal });
+    if (!res.ok) { res.body?.cancel().catch(() => {}); return ''; }
+    const b = await readBody(res, maxBytes);
+    if (b.tooBig) return '';
+    let buf = b.buf;
+    if (buf[0] === 0x1f && buf[1] === 0x8b) { try { buf = zlib.gunzipSync(buf); } catch { return ''; } }
+    return buf.toString('utf8');
+  } catch { return ''; }
+}
+
+// Sitemap-first discovery: the pages a site lists itself, shallow ones first. Link-following still runs on top,
+// so pages missing from the sitemap are found too.
+async function readSitemaps(start, robotsText, scope, signal) {
+  const sameHost = (u) => { try { return new URL(u).host === start.host; } catch { return false; } };
+  const roots = sitemapsFromRobots(robotsText).filter(sameHost);
+  if (!roots.length) roots.push(`${start.origin}/sitemap.xml`);
+  const queue = [...new Set(roots)];
+  const seenMaps = new Set(queue);
+  const hrefs = [];
+  for (let fetched = 0; queue.length && fetched < 8 && hrefs.length < CFG.siteSitemapMax * 3; fetched++) {
+    const text = await fetchText(queue.shift(), 10000, 8 * MB, signal);
+    if (!text) continue;
+    const { urls, maps } = parseSitemapXml(text);
+    hrefs.push(...urls);
+    for (const m of maps) if (!seenMaps.has(m) && sameHost(m)) { seenMaps.add(m); queue.push(m); }
+  }
+  return sortShallowFirst([...pageLinksFromHrefs(hrefs, start.href, scope)]).slice(0, CFG.siteSitemapMax);
+}
 
 // ---------------------------------------------------------------- entry point
 // One entry for everything: a folder listing is downloaded as files, anything else is crawled as a whole site
 // (or, when the link points deeper than the home page, as that part of the site).
+// The pipeline decides by itself how to get in: plain fetch, a real browser, a stealthier browser, page by page.
 export async function downloadWebsite(parsed, workDir, onStatus = () => {}, opts = {}) {
-  if (opts.forceBrowser && !CFG.enableBrowser)
-    throw new UserError('🧭 Browser mode is disabled on this bot.', 'browser_disabled');
+  const L = opts.L || tr('en');
   const timings = {};
   const siteDir = path.join(workDir, 'site');
   await fs.mkdir(siteDir, { recursive: true });
 
   let t = Date.now();
-  onStatus(STATUS.opening(parsed.url.host));
-  const first = await fetchMain(parsed.url, parsed.explicitScheme);
+  onStatus(L.STATUS.opening(parsed.url.host));
+  const first = await fetchMain(parsed.url, parsed.explicitScheme, opts.signal);
   timings.fetch = Date.now() - t;
 
   const isHtml = !first.contentType || /html/i.test(first.contentType);
@@ -83,16 +100,16 @@ export async function downloadWebsite(parsed, workDir, onStatus = () => {}, opts
     requestedUrl: parsed.url.href, finalUrl: first.finalUrl, isHtml,
   });
   if (check.fatal && !check.challenge) throw new UserError(check.fatal, check.code);
-  if (check.challenge && !CFG.enableBrowser) throw new UserError(check.fatal, 'cloudflare');
+  if (check.challenge && !CFG.enableBrowser) throw new UserError(check.fatal, check.code);
 
   const $ = cheerio.load(html0);
-  const listing = !check.challenge && !opts.forceBrowser && isListingTitle($('title').first().text(), $('h1').first().text());
-  const c = { first, html0, workDir, siteDir, onStatus, timings, warnings: [...check.warnings], check, opts };
+  const listing = !check.challenge && isListingTitle($('title').first().text(), $('h1').first().text());
+  const c = { first, html0, workDir, siteDir, onStatus, timings, warnings: [...check.warnings], check, opts, L, S: L.STATUS };
   return listing ? runListing(c) : runWebsite(c);
 }
 
 // ---------------------------------------------------------------- open folder listing
-async function runListing({ first, html0, workDir, siteDir, onStatus, timings, warnings }) {
+async function runListing({ first, html0, workDir, siteDir, onStatus, timings, warnings, opts, S }) {
   const PART = CFG.partBytes - MB; // room for index/readme inside each ZIP
   const start = new URL(first.finalUrl);
   start.search = '';
@@ -105,6 +122,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     maxTotalBytes: Math.min(CFG.siteMaxTotalBytes, CFG.siteMaxParts * PART),
     timeoutMs: CFG.siteTimeoutMs,
     fetchTimeoutMs: 120000, // big files need time
+    signal: opts.signal,
   });
 
   let t = Date.now();
@@ -117,7 +135,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     const d = queue.shift();
     let html = d.html;
     if (html == null) {
-      const got = await fetchHtml(d.url);
+      const got = await fetchHtml(d.url, { signal: opts.signal });
       if (got.fail) { job.failed.push({ url: d.url, reason: `could not read folder (${got.fail})` }); continue; }
       html = got.html;
     }
@@ -127,7 +145,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
       continue;
     }
     scanned++;
-    onStatus(STATUS.folders(scanned, fileUrls.size));
+    onStatus(S.folders(scanned, fileUrls.size));
     const { dirs, files } = classifyListingHrefs(hrefsOf($), d.url);
     for (const f of files) fileUrls.add(f);
     for (const sd of dirs) {
@@ -141,6 +159,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
       queue.push({ url: sd, depth: d.depth + 1, html: null });
     }
   }
+  job.throwIfCancelled();
 
   let list = [...fileUrls];
   if (list.length > CFG.siteMaxFiles) {
@@ -148,7 +167,7 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     list = list.slice(0, CFG.siteMaxFiles);
   }
   if (!list.length)
-    throw new UserError("📂 That folder listing has no files I can download.", 'empty_listing');
+    throw new UserError('📂 That folder listing has no files I can download.', 'empty_listing');
 
   // 2) download, keeping the folder structure relative to the listing you sent
   for (const u of list) job.localOverrides.set(u, listingLocal(u, rootPath));
@@ -160,27 +179,29 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     const n = Date.now();
     if (n - lastEmit > 1200 && job.progress.done < job.progress.total) {
       lastEmit = n;
-      onStatus(STATUS.files(job.progress.done, job.progress.total));
+      onStatus(S.files(job.progress.done, job.progress.total));
     }
   });
+  job.throwIfCancelled();
   timings.assets = Date.now() - t;
   if (!job.files.size)
-    throw new UserError(`📂 I couldn't download any files from that folder (each must be under ${mb(CFG.maxFileBytes)} MB). See the reasons with a smaller folder.`, 'listing_unsavable');
+    throw new UserError(`📂 I couldn't download any files from that folder (each must be under ${mb(CFG.maxFileBytes)} MB).`, 'listing_unsavable');
 
   // 3) pack into Telegram-sized ZIP parts
   t = Date.now();
-  onStatus(STATUS.zip);
+  onStatus(S.zip);
   const { bins, overflow } = packParts([...job.files.values()], PART, CFG.siteMaxParts);
   for (const f of overflow) {
     job.files.delete(f.url);
     job.skipped.push({ url: f.url, reason: `did not fit in ${CFG.siteMaxParts} ZIP parts`, size: f.size });
   }
-  if (overflow.length) warnings.push(NOTES.overflow(overflow.length));
+  if (overflow.length) warnings.push({ c: 'overflow', n: overflow.length });
 
   const n = bins.length;
   const skipText = skippedText(job);
   const parts = [];
   for (let i = 0; i < n; i++) {
+    job.throwIfCancelled();
     const files = bins[i].files.sort((a, b) => a.local.localeCompare(b.local));
     const readme = [
       `Website Downloader - files from ${job.main.host}${rootPath}`,
@@ -203,20 +224,18 @@ async function runListing({ first, html0, workDir, siteDir, onStatus, timings, w
     parts.push({ zipPath, zipName, bytes: size });
   }
   timings.zip = Date.now() - t;
-  if (job.timedOut) warnings.push(NOTES.slow);
+  if (job.timedOut) warnings.push({ c: 'slow' });
 
   return {
     kind: 'listing', parts, host: job.main.host, title: rootPath,
     dirCount: dirsSeen.size, fileCount: job.files.size,
     zipBytes: parts.reduce((s, p) => s + p.bytes, 0),
-    mode: 'site-files', warnings, skipped: job.skipped.length, failed: job.failed.length, timings, thin: false,
+    mode: 'site-files', warnings, skipped: job.skipped.length, failed: job.failed.length, timings, fingerprint: null,
   };
 }
 
 // ---------------------------------------------------------------- a whole website (or a part of one)
-const bytesOf = (str) => Buffer.byteLength(str, 'utf8');
-
-async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, warnings, check, opts }) {
+async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, warnings, check, opts, S }) {
   const start = new URL(first.finalUrl);
   start.hash = '';
   const scope = { host: start.host, path: scopePathOf(start.pathname) }; // "/" = the whole site
@@ -225,111 +244,188 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     maxTotalBytes: CFG.siteMaxTotalBytes,
     maxFiles: 5000,
     fetchTimeoutMs: 60000, // big files need time
+    signal: opts.signal,
   });
+  job.used.add('_all-pages.html');
 
-  // static fetch by default; a real browser for JavaScript-built sites, challenges and /browser
-  let useBrowser = CFG.enableBrowser && (opts.forceBrowser || check.challenge || looksLikeSpa(html0));
-  const getBrowserPage = async (url) => {
-    try {
-      const r = await browserSem.run(() => renderWithBrowser(job, url));
-      if (isChallengeHtml(r.html)) return { fail: 'challenge' };
-      return { html: r.html, finalUrl: r.finalUrl, original: r.originalHtml };
-    } catch (e) { return { fail: e?.message || 'browser error' }; }
+  // ---- the browser ladder, decided automatically ----
+  // 1) plain fetch (fast, keeps the site's own scripts)  2) real browser  3) stealthier browser that waits for bot checks.
+  // Pages rendered in a browser are saved as snapshots (scripts removed); plain pages keep their scripts.
+  const browserOn = CFG.enableBrowser;
+  let browserBudget = CFG.siteMaxPagesBrowser; // how many pages may use the (slow) browser
+  let stealth = false;                         // once the plain browser was turned away, later pages start stealthy
+  let thinMisses = 0;                          // thin pages where rendering added nothing: stop trying after a few
+  const render = async (url) => {
+    const attempt = async (st) => {
+      try {
+        const r = await browserSem.run(() => renderWithBrowser(job, url, { stealth: st }));
+        return r.challenge ? { fail: 'challenge' } : { html: r.html, finalUrl: r.finalUrl, original: r.originalHtml };
+      } catch (e) { return { fail: e?.message || 'browser error' }; }
+    };
+    let got = await attempt(stealth);
+    if (got.fail === 'challenge' && !stealth) {
+      stealth = true;
+      onStatus(S.browser2);
+      got = await attempt(true);
+    }
+    return got;
   };
-  const getPage = (url) => (useBrowser ? getBrowserPage(url) : fetchHtml(url));
+  const tryBrowser = async (url) => {
+    if (!browserOn || browserBudget <= 0) return { fail: 'browser not available' };
+    browserBudget--;
+    return render(url);
+  };
 
+  // ---- the first page ----
   let t = Date.now();
   let startHtml = html0;
+  let startRendered = false;
   let startOriginal = null;
-  if (useBrowser) {
-    onStatus(STATUS.browser);
-    const r = await getBrowserPage(first.finalUrl);
-    if (r.fail === 'challenge') throw new UserError('cloudflare challenge', 'cloudflare');
+  let spaSite = false;
+  const trouble = check.challenge ? 'challenge' : looksLikeSpa(html0) ? 'spa' : looksThin(html0) ? 'thin' : null;
+  if (trouble && browserOn) {
+    onStatus(S.browser);
+    const r = await tryBrowser(first.finalUrl);
     if (r.fail) {
-      if (check.challenge) throw new UserError('cloudflare challenge', 'cloudflare');
-      if (opts.forceBrowser) throw new UserError(`browser mode failed: ${r.fail}`, 'browser_failed');
-      useBrowser = false;
-      warnings.push(NOTES.browserFallback);
+      if (check.challenge) throw new UserError(check.fatal, check.code);
+      if (trouble === 'spa') warnings.push({ c: 'browserFallback' });
+    } else if (trouble === 'thin' && visibleTextLength(r.html) <= visibleTextLength(html0) * 1.3) {
+      // rendering added nothing: keep the plain page with its working scripts
     } else {
       startHtml = r.html;
+      startRendered = true;
       startOriginal = r.original;
+      spaSite = trouble !== 'thin';
     }
+    timings.browser = Date.now() - t;
+  } else if (check.challenge) {
+    throw new UserError(check.fatal, check.code);
   }
-  const maxPages = useBrowser ? CFG.siteMaxPagesBrowser : CFG.siteMaxPages;
+  const maxPages = spaSite ? CFG.siteMaxPagesBrowser : CFG.siteMaxPages;
 
-  let robots = [];
-  if (CFG.siteRespectRobots) {
-    const got = await safeFetch(`${start.origin}/robots.txt`, { timeoutMs: 8000 }).then(async ({ res }) => {
-      if (!res.ok) { res.body?.cancel().catch(() => {}); return ''; }
-      const b = await readBody(res, 200_000);
-      return b.tooBig ? '' : b.buf.toString('utf8');
-    }).catch(() => '');
-    robots = parseRobots(got);
-  }
+  // ---- robots.txt and sitemap ----
+  onStatus(S.mapping);
+  const robotsText = (CFG.siteRespectRobots || CFG.siteSitemap) ? await fetchText(`${start.origin}/robots.txt`, 8000, 200_000, opts.signal) : '';
+  const robots = CFG.siteRespectRobots ? parseRobots(robotsText) : [];
+  const seeds = CFG.siteSitemap ? await readSitemaps(start, robotsText, scope, opts.signal) : [];
+  job.throwIfCancelled();
 
-  // breadth-first crawl of every page inside the scope
+  // ---- one page of the crawl, with a per-page decision about the browser ----
+  const getPage = async (url) => {
+    if (spaSite && browserBudget > 0) { // this site builds every page with JavaScript: skip the pointless plain fetch
+      const r = await tryBrowser(url);
+      return r.fail ? { fail: r.fail } : { ...r, rendered: true };
+    }
+    const got = await fetchHtml(url, { signal: opts.signal });
+    if (got.fail) {
+      // refused to a plain request: a real browser may still get in
+      if ([403, 429, 503].includes(got.status) && browserOn && browserBudget > 0) {
+        const r = await tryBrowser(url);
+        if (!r.fail) return { ...r, rendered: true };
+      }
+      return got;
+    }
+    const walled = isChallengeHtml(got.html) || isBotWallHtml(got.html);
+    if (walled || looksLikeSpa(got.html)) {
+      const r = await tryBrowser(url);
+      if (!r.fail) return { ...r, rendered: true };
+      return walled ? { fail: 'blocked by bot protection', status: 403 } : got;
+    }
+    if (browserOn && browserBudget > 0 && thinMisses < 3 && looksThin(got.html)) {
+      const r = await tryBrowser(url);
+      if (!r.fail && visibleTextLength(r.html) > visibleTextLength(got.html) * 1.3) return { ...r, rendered: true };
+      thinMisses++;
+    }
+    return got;
+  };
+
+  // ---- breadth-first crawl of every page inside the scope ----
   const startKey = pageKey(start.href);
-  const pages = new Map(); // key -> { key, base, html, local }
-  pages.set(startKey, { key: startKey, base: start.href, html: startHtml, local: pageLocal(startKey) });
+  const pages = new Map(); // key -> { key, base, html, local, rendered, fetchUrl, etag, lastModified, hash }
+  pages.set(startKey, {
+    key: startKey, base: start.href, html: startHtml, local: pageLocal(startKey), rendered: startRendered,
+    fetchUrl: first.finalUrl, etag: first.headers?.get?.('etag') || null, lastModified: first.headers?.get?.('last-modified') || null, hash: hashOf(html0),
+  });
   const seen = new Set([startKey]);
   const fileLinks = new Set();
   let accepted = 1;
+  let loginSkipped = 0;
   let frontier = [startKey];
+  const enqueue = (link, next) => {
+    if (seen.has(link)) return;
+    seen.add(link);
+    if (!robotsAllows(robots, link.slice(link.indexOf('/')))) {
+      job.skipped.push({ url: `${start.protocol}//${link}`, reason: 'blocked by robots.txt' });
+      return;
+    }
+    if (accepted >= maxPages) {
+      job.skipped.push({ url: `${start.protocol}//${link}`, reason: `page limit (${maxPages}) reached` });
+      return;
+    }
+    accepted++;
+    next.push(link);
+  };
   for (let depth = 0; frontier.length && !job.expired(); depth++) {
     const next = [];
-    await pool(frontier, useBrowser ? CFG.browserConcurrency : 4, async (key) => {
+    if (depth === 0) for (const k of seeds) enqueue(k, next);
+    await pool(frontier, 4, async (key) => {
       if (job.expired()) return;
       let page = pages.get(key);
       if (!page) {
         const url = `${start.protocol}//${key}`;
         const got = await getPage(url);
         if (got.fail) { job.failed.push({ url, reason: got.fail }); return; }
-        if (new URL(got.finalUrl).host !== scope.host) { job.skipped.push({ url: got.finalUrl, reason: 'redirected to another site' }); return; }
-        page = { key, base: got.finalUrl, html: got.html, local: pageLocal(key) };
+        const fin = new URL(got.finalUrl);
+        if (fin.host !== scope.host) { job.skipped.push({ url: got.finalUrl, reason: 'redirected to another site' }); return; }
+        if (LOGIN_PATH.test(fin.pathname) && !LOGIN_PATH.test(new URL(url).pathname)) {
+          loginSkipped++;
+          job.skipped.push({ url, reason: 'needs sign-in' });
+          return;
+        }
+        page = {
+          key, base: got.finalUrl, html: got.html, local: pageLocal(key), rendered: !!got.rendered,
+          fetchUrl: url, etag: got.etag || null, lastModified: got.lastModified || null, hash: got.rendered ? null : hashOf(got.html),
+        };
         pages.set(key, page);
-        onStatus(STATUS.pages(pages.size, accepted));
+        onStatus(S.pages(pages.size, accepted));
       }
-      const $p = cheerio.load(page.html);
-      const hrefs = hrefsOf($p);
+      const hrefs = hrefsOf(cheerio.load(page.html));
       for (const f of fileLinksFromHrefs(hrefs, page.base, scope.host)) if (fileLinks.size < CFG.siteMaxFiles) fileLinks.add(f);
       if (depth >= CFG.siteDepth) return;
-      for (const link of pageLinksFromHrefs(hrefs, page.base, scope)) {
-        if (seen.has(link)) continue;
-        seen.add(link);
-        if (!robotsAllows(robots, link.slice(link.indexOf('/')))) {
-          job.skipped.push({ url: `${start.protocol}//${link}`, reason: 'blocked by robots.txt' });
-          continue;
-        }
-        if (accepted >= maxPages) {
-          job.skipped.push({ url: `${start.protocol}//${link}`, reason: `page limit (${maxPages}) reached` });
-          continue;
-        }
-        accepted++;
-        next.push(link);
-      }
+      for (const link of pageLinksFromHrefs(hrefs, page.base, scope)) enqueue(link, next);
     });
     frontier = next;
   }
+  job.throwIfCancelled();
   const pageLimitHit = job.skipped.filter((s) => s.reason.startsWith('page limit')).length;
   const robotsBlocked = job.skipped.filter((s) => s.reason === 'blocked by robots.txt').length;
 
-  // every asset of every page, plus linked documents, downloaded once and shared
+  // ---- every asset of every page, plus linked documents, downloaded once and shared ----
   for (const p of pages.values()) job.used.add(p.local.toLowerCase());
-  onStatus(STATUS.assets());
+  onStatus(S.assets());
   let lastEmit = 0;
   job.onProgress = (done, total) => {
     const n = Date.now();
-    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(STATUS.assets(done, total)); }
+    if (n - lastEmit > 1200 && done < total) { lastEmit = n; onStatus(S.assets(done, total)); }
   };
   const docs = [...pages.values()].map((p) => ({ html: p.html, base: p.base }));
   if (startOriginal) docs.push({ html: startOriginal, base: start.href });
   await collectAssets(job, docs, start.href, [...fileLinks]);
+  job.throwIfCancelled();
   await rewriteCssFiles(job);
 
-  // decide what fits in the ZIP parts BEFORE rewriting links, so anything left out keeps its live URL
+  // ---- smart size budgeting: shrink images BEFORE leaving anything out ----
   const startPage = pages.get(startKey);
   const pageRecs = [...pages.values()].map((p) => ({ url: p.base, local: p.local, type: 'text/html', size: bytesOf(p.html), page: p }));
   const startRec = pageRecs.find((r) => r.page === startPage);
+  const totalEstimate = () => pageRecs.reduce((n, f) => n + estimate(f), 0) + [...job.files.values()].reduce((n, f) => n + estimate(f), 0);
+  const capacityTotal = (CFG.partBytes - MB) * CFG.siteMaxParts;
+  if (CFG.compressImages && totalEstimate() > capacityTotal) {
+    const r = await compressImages(job, { needBytes: totalEstimate() - capacityTotal * 0.97 });
+    if (r.count) warnings.push({ c: 'compressed', n: r.count });
+  }
+
+  // decide what fits in the ZIP parts BEFORE rewriting links, so anything left out keeps its live URL
   const { bins, overflow } = packPrioritized(
     [...pageRecs.filter((r) => r !== startRec), ...job.files.values()],
     { capacity: CFG.partBytes - MB, maxParts: CFG.siteMaxParts, weigh: estimate, rankOf: rank, pinned: [startRec] },
@@ -339,22 +435,24 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     else { await fs.rm(path.join(siteDir, f.local), { force: true }); job.files.delete(f.url); job.totalBytes -= f.size; }
     job.skipped.push({ url: f.url, reason: `did not fit in ${CFG.siteMaxParts} ZIP parts`, size: f.size });
   }
-  if (overflow.length) warnings.push(NOTES.overflow(overflow.length));
+  if (overflow.length) warnings.push({ c: 'overflow', n: overflow.length });
 
-  // wire everything: pages, assets and linked documents point to local paths; the rest keeps its live URL
+  // ---- wire everything: pages, assets and linked documents point to local paths; the rest keeps its live URL ----
   const pageLookup = (abs) => {
     try {
       if (new URL(abs).search) return undefined;
       return pages.get(pageKey(abs))?.local ?? job.files.get(abs)?.local;
     } catch { return undefined; }
   };
+  const writeFailed = new Set();
   for (const p of pages.values()) {
-    const out = rewriteHtml(cheerio.load(p.html), p.base, job.files, { from: p.local, pageLookup, stripScripts: useBrowser });
+    const out = rewriteHtml(cheerio.load(p.html), p.base, job.files, { from: p.local, pageLookup, stripScripts: p.rendered });
     const full = path.join(siteDir, p.local);
     try {
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, out);
     } catch (e) {
+      writeFailed.add(p.local);
       job.failed.push({ url: p.base, reason: `could not save page (${e.message})` });
     }
   }
@@ -369,15 +467,39 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     await fs.writeFile(path.join(siteDir, 'index.original.html'), orig);
     extraEntries.push({ name: 'index.original.html', pin: true, file: path.join(siteDir, 'index.original.html') });
   }
+  // a local table of contents: every saved page in one list (handy for sites whose own menu needs JavaScript)
+  const saved = [...pages.values()].filter((p) => !writeFailed.has(p.local)).sort((a, b) => a.local.localeCompare(b.local));
+  if (saved.length > 1) {
+    const rows = saved.map((p) => `<li><a href="${escapeHtml(relPath('_all-pages.html', p.local))}">${escapeHtml(titleOf(p.html) || p.local)}</a> <small>${escapeHtml(p.local)}</small></li>`).join('\n');
+    extraEntries.push({
+      name: '_all-pages.html', pin: true,
+      text: `<!doctype html>\n<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>${escapeHtml(job.main.host)} - all pages</title>\n<style>body{font:16px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}li{margin:.35rem 0}small{color:#777;margin-left:.4rem;word-break:break-all}</style>\n<h1>${escapeHtml(job.main.host)}</h1>\n<p>${saved.length} saved pages</p>\n<ul>\n${rows}\n</ul>\n`,
+    });
+  }
 
-  if (pageLimitHit) warnings.push(NOTES.pageLimit(maxPages));
-  if (robotsBlocked) warnings.push(NOTES.robots(robotsBlocked));
-  if (job.timedOut) warnings.push(NOTES.slow);
+  // ---- verify before sending: every local link must point to a file that is really in the ZIPs ----
+  onStatus(S.checking);
+  for (const b of bins) b.files = b.files.filter((f) => !writeFailed.has(f.local));
+  let linkStats = null;
+  if (CFG.linkCheck) {
+    const entrySet = new Set([...bins.flatMap((b) => b.files.map((f) => f.local)), ...extraEntries.map((e) => e.name), 'readme.txt', 'skipped.txt'].map((x) => x.toLowerCase()));
+    const live = new Map();
+    for (const f of job.files.values()) live.set(f.local.toLowerCase(), f.url);
+    for (const p of pages.values()) live.set(p.local.toLowerCase(), p.base);
+    linkStats = await checkLinks({ dir: siteDir, pages: saved, entries: entrySet, liveUrlFor: (local) => live.get(local.toLowerCase()) });
+    if (linkStats.fixed || linkStats.broken) console.log(`[linkcheck] ${job.main.host}: ${linkStats.checked} checked, ${linkStats.fixed} repaired, ${linkStats.broken} unresolved`);
+  }
+
+  if (loginSkipped) warnings.push({ c: 'loginPages', n: loginSkipped });
+  if (pageLimitHit) warnings.push({ c: 'pageLimit', n: maxPages });
+  if (robotsBlocked) warnings.push({ c: 'robots', n: robotsBlocked });
+  if (job.timedOut) warnings.push({ c: 'slow' });
   timings.assets = Date.now() - t;
 
-  // ---- pack into ZIP parts: all parts unzip into the same folder, and every link is relative to that folder
+  // ---- pack into ZIP parts: all parts unzip into the same folder, and every link is relative to that folder ----
   t = Date.now();
-  onStatus(STATUS.zip);
+  onStatus(S.zip);
+  const anyRendered = [...pages.values()].some((p) => p.rendered);
   const skipText = skippedText(job);
   const scopeLabel = `${job.main.host}${scope.path === '/' ? '' : scope.path}`;
   const readme = [
@@ -389,10 +511,11 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     '',
     'Notes:',
     `- ${pages.size} page${pages.size === 1 ? '' : 's'} saved. Links between saved pages, images, styles and documents work offline; anything else opens the live site.`,
+    ...(saved.length > 1 ? ['- _all-pages.html lists every saved page in one place.'] : []),
     "- Sign-ins, forms, search and live data need the site's server and won't work offline.",
     '- Links with search filters (?page=2) are not followed.',
     '- If a page looks broken when opened directly, run "npx serve" inside the folder and open the address it shows.',
-    ...(useBrowser ? ['- Pages were captured the way a browser shows them, so scripts were removed and index.html opens with a double-click.'] : []),
+    ...(anyRendered ? ['- Pages that need JavaScript were captured the way a browser shows them, so their scripts were removed and they open with a double-click.'] : []),
     ...(startOriginal ? ["- index.original.html keeps the home page's interactive features (needs npx serve)."] : []),
     ...(skipText ? ['- See skipped.txt for files that were left out.'] : []),
   ].join('\n') + '\n';
@@ -407,12 +530,14 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
         : []),
     ],
   }));
-  work[0].entries.find((e) => e.name === startRec.local && !e.text).pin = true;
+  const startEntry = work[0].entries.find((e) => e.name === startRec.local && !e.text);
+  if (startEntry) startEntry.pin = true;
 
   // zip; if a part still lands over Telegram's limit (poorly compressible content), split it in two
   const made = [];
   let seq = 0;
   while (work.length) {
+    job.throwIfCancelled();
     const bin = work.shift();
     const zipPath = path.join(workDir, `part-${seq++}.zip`);
     await zipEntries(zipPath, bin.entries);
@@ -432,14 +557,20 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     made.push({ zipPath, bytes: size, entries: bin.entries });
   }
   const n = made.length;
-  const base = hostFile(job);
-  const parts = made.map((m, i) => ({ zipPath: m.zipPath, zipName: n > 1 ? `${base}-part${i + 1}of${n}.zip` : `${base}.zip`, bytes: m.bytes }));
+  const baseName = hostFile(job);
+  const parts = made.map((m, i) => ({ zipPath: m.zipPath, zipName: n > 1 ? `${baseName}-part${i + 1}of${n}.zip` : `${baseName}.zip`, bytes: m.bytes }));
   timings.zip = Date.now() - t;
   const zipBytes = parts.reduce((s, p) => s + p.bytes, 0);
+
+  // what a later "Fresh copy" compares against (only plain pages can be checked cheaply)
+  const fingerprint = anyRendered
+    ? null
+    : [...pages.values()].filter((p) => p.hash).map((p) => ({ u: p.fetchUrl, e: p.etag, m: p.lastModified, h: p.hash }));
 
   return {
     kind: 'pages', parts, host: job.main.host, title,
     pages: pages.size, fileCount: job.files.size + pages.size, zipBytes,
-    mode: useBrowser ? 'site-browser' : 'site-pages', warnings, skipped: job.skipped.length, failed: job.failed.length, timings, thin: false,
+    mode: anyRendered ? 'site-browser' : 'site-pages', warnings, skipped: job.skipped.length, failed: job.failed.length,
+    timings, fingerprint, linkCheck: linkStats,
   };
 }

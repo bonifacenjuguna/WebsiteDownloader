@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.6.0 - Smarter backend, simpler UI
+Principle: every decision is automatic, and people only see outcomes.
+
+**What you asked for**
+- **History can be cleared.** `/history` has a ✖ next to every entry and a 🗑 *Clear history* button with a one-tap confirmation. Cleared history is unlinked from the person; the shared copy other users get instantly is kept, with no link back to who asked.
+- **`/browser` is gone** (command, 🧭 button, hints, help topic). Old 🧭 buttons in earlier chats still work and simply get a fresh copy. The backend now decides by itself, per page: plain fetch → real browser → stealth browser that waits for bot checks.
+
+**Backend**
+- **Retry ladder, per page:** pages that need JavaScript, are thin, or are refused to a plain request are rendered in the browser, the rest stay plain and keep their scripts. A thin page is only replaced when rendering really adds content.
+- **Sitemap-first crawling** (`robots.txt` Sitemap lines, `sitemap.xml`, sitemap indexes, `.gz`), shallow pages first, on top of normal link following.
+- **Resume after a restart:** running jobs are kept in Redis; a deploy or crash no longer leaves people on a dead progress message (needs Redis).
+- **Incremental Fresh copy:** conditional requests (ETag / Last-Modified / content hash) check whether the site changed; if not, the saved copy is returned at once with no rebuild.
+- **Per-host politeness:** requests to one host are spaced out, doubling on 429/503 and honouring Retry-After.
+- **Duplicate-build merging:** `www.` and non-`www` are one site; simultaneous requests share one build and can no longer both become leaders.
+- **Smart size budgeting:** big images are recompressed (same file name and format) before anything is left out (optional `sharp`).
+- **Health:** `/health` endpoint, Chromium recycled when the container is short on memory, admins alerted when the failure rate spikes or Chromium cannot start.
+- **Better failure detection:** geo-blocked sites, bot walls that survive a real browser, and pages that redirect to a sign-in are reported precisely (and sign-in pages are left out of the crawl, with a note).
+- **Cancel:** every progress message has ✖ Cancel; the job stops at its next checkpoint.
+- **Abuse protection:** per-user per-site and global per-site daily caps, a short pause after repeated failed attempts, and a long negative cache for sites too big to send.
+- Fixed: `/stats` browser share was always 0%; a page that failed to write could break the ZIP.
+
+**Simple UI**
+- One live progress message (with a progress bar) that is edited in place, never faster than Telegram allows.
+- **Links anywhere in a message** work (`check https://x.com/a, thanks`); tracking parameters (`utm_*`, `fbclid`, …) are stripped. Several links: the first is saved and you are told.
+- **Result card:** ✅ site / 📝 title / 📦 pages • files • size, at most ONE note, buttons only when useful.
+- **Delivery order:** several ZIPs → a summary message first, then *Part i of n*.
+- **Queue position** ("You're #2 in line").
+- **Languages:** English, Español, Français, Português, Deutsch, Русский, Kiswahili, chosen from your Telegram language or `/language`. Captions are stored structured, so a copy built for one person is read in everyone's own language.
+- **Shorter menu:** `/start`, `/help`, `/history`, `/privacy`. `/download`, `/preview`, `/language`, `/myid` still work when typed.
+
+**Privacy**
+- `/privacy`: choose auto-delete (7 days / 30 days / never / default) and *Delete all my data* in one tap.
+- Admin domain block list: `BLOCKED_DOMAINS`, `/block`, `/unblock`.
+
+**Saved-site quality**
+- More thorough rewriting: `srcset` with commas in URLs, lazy-load attributes (`data-src`, `data-bg`, …), `image-set()`, `<use>`.
+- `_all-pages.html`: a local index of every saved page.
+- **Link check before sending:** every local link must point to a file that is really in the ZIPs; broken ones are pointed back at the live URL.
+
+**Housekeeping**
+- Retired the unused single-page pipeline (`downloader.js`); `fetcher.js` replaces it. `trim.js` keeps only the ranking helpers.
+- Tests added (`npm test`) for URLs, crawling helpers, CSS/srcset rewriting, translations and captions.
+- Database migration 3 (adds per-user language and retention, an anonymous owner for cleared history, and the block list). Run once automatically.
+- New optional dependency: `sharp`. New environment variables are listed in `.env.example`.
+
 ## 1.5.0 - Whole-site downloads (one command, several ZIPs)
 - **Every link now saves the whole site**, not just one page. `example.com` crawls every reachable page; `example.com/docs` crawls that part. `/site` is gone from the menu and help (kept as a hidden alias).
 - **Locally wired:** pages saved as `folder/index.html`; links between pages, assets and linked documents (PDF, zip, office files, audio/video) point to relative paths.

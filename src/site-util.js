@@ -185,3 +185,34 @@ ${rows}
 </ul>
 `;
 }
+
+// ---------- sitemaps ----------
+export function sitemapsFromRobots(text) {
+  const out = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const m = /^\s*sitemap\s*:\s*(\S+)/i.exec(raw.replace(/#.*/, ''));
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+
+const unxml = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+
+// Handles both <urlset> (pages) and <sitemapindex> (more sitemaps). Regex is enough for this flat format.
+export function parseSitemapXml(text) {
+  const urls = [];
+  const maps = [];
+  const t = String(text);
+  if (/<sitemapindex[\s>]/i.test(t)) {
+    for (const m of t.matchAll(/<sitemap[\s>][\s\S]*?<loc>([\s\S]*?)<\/loc>/gi)) maps.push(unxml(m[1]));
+  } else {
+    for (const m of t.matchAll(/<url[\s>][\s\S]*?<loc>([\s\S]*?)<\/loc>/gi)) urls.push(unxml(m[1]));
+  }
+  return { urls, maps };
+}
+
+// shallow pages first: when a sitemap has thousands of URLs and only some fit, the top of the site matters most
+export function sortShallowFirst(keys) {
+  const depth = (k) => k.split('/').filter(Boolean).length;
+  return [...keys].sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+}

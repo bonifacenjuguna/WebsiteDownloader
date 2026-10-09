@@ -1,7 +1,6 @@
 import Redis from 'ioredis';
 import { CFG } from './config.js';
 import * as db from './db.js';
-import { THIN_MARK } from './copy.js';
 
 let lastWarn = 0;
 const warn = (e) => {
@@ -29,6 +28,9 @@ class MemoryKV {
     return true;
   }
   async del(k) { this.m.delete(k); }
+  async sAdd(k, m) { const v = this.m.get(k); const set = v?.val instanceof Set ? v.val : new Set(); set.add(m); this.m.set(k, { val: set, exp: Date.now() + 7 * 864e5 }); }
+  async sRem(k, m) { const v = this.m.get(k); if (v?.val instanceof Set) v.val.delete(m); }
+  async sMembers(k) { const v = this.m.get(k); return v?.val instanceof Set ? [...v.val] : []; }
   async pttl(k) { const v = this.m.get(k); return v ? Math.max(0, v.exp - Date.now()) : -2; }
   async incr(k, ttlMs) {
     const cur = Number(await this.get(k)) || 0;
@@ -63,6 +65,9 @@ class RedisKV {
   async set(k, v, ttlMs) { await this.#s(() => this.r.set(k, v, 'PX', ttlMs)); }
   setNx(k, v, ttlMs) { return this.#s(async () => (await this.r.set(k, v, 'PX', ttlMs, 'NX')) === 'OK', true); }
   async del(k) { await this.#s(() => this.r.del(k)); }
+  async sAdd(k, m) { await this.#s(async () => { await this.r.sadd(k, m); await this.r.pexpire(k, 7 * 864e5); }); }
+  async sRem(k, m) { await this.#s(() => this.r.srem(k, m)); }
+  sMembers(k) { return this.#s(() => this.r.smembers(k), []); }
   pttl(k) { return this.#s(() => this.r.pttl(k), -2); }
   incr(k, ttlMs) {
     return this.#s(async () => {
@@ -103,7 +108,7 @@ export const cache = {
     if (!row) return null;
     const data = {
       urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
-      host: row.host, title: row.title, thin: (row.caption || '').includes(THIN_MARK), section: (row.mode || '').startsWith('site-'), mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
+      host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
       at: new Date(row.created_at).getTime(),
     };
     const left = data.at + CFG.cacheTtlMs - Date.now();
@@ -113,7 +118,7 @@ export const cache = {
   setResult: (key, data) => kv.set(`res:${key}`, JSON.stringify(data), CFG.cacheTtlMs),
   dropResult: (key) => kv.del(`res:${key}`),
   async getNegative(key) { return parse(await kv.get(`neg:${key}`)); },
-  setNegative: (key, err) => kv.set(`neg:${key}`, JSON.stringify(err), CFG.negTtlMs),
+  setNegative: (key, err, ttlMs = CFG.negTtlMs) => kv.set(`neg:${key}`, JSON.stringify(err), ttlMs),
   // buttons carry only the 40-char key; this maps it back to the URL
   rememberUrl: (key, url) => kv.set(`url:${key}`, url, 24 * 60 * 60 * 1000),
   async urlFor(key) { return (await kv.get(`url:${key}`)) || (await db.urlForKey(key)); },
@@ -136,6 +141,43 @@ export const previews = {
 
 const dayStamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
 export const quota = {
+  // new builds of one site by one user today (UTC), including this one
+  domain: (uid, host) => kv.incr(`dq:${uid}:${host}:${dayStamp()}`, 26 * 60 * 60 * 1000),
+  // new builds of one site today across all users
+  domainGlobal: (host) => kv.incr(`dg:${host}:${dayStamp()}`, 26 * 60 * 60 * 1000),
   // returns how many new downloads this user has started today (UTC), including this one
   consume: (uid) => kv.incr(`quota:${uid}:${dayStamp()}`, 26 * 60 * 60 * 1000),
+};
+
+// ---------- language ----------
+// A language the user picked with /language (kept for a year). Without a pick, the Telegram app language is used.
+export const lang = {
+  async get(uid) {
+    const v = await kv.get(`lang:${uid}`);
+    if (v) return v === '-' ? null : v;
+    const fromDb = await db.getLang(uid);
+    await kv.set(`lang:${uid}`, fromDb || '-', fromDb ? 365 * 864e5 : 60 * 60 * 1000);
+    return fromDb;
+  },
+  async set(uid, code) {
+    await kv.set(`lang:${uid}`, code || '-', 365 * 864e5);
+    await db.setLang(uid, code);
+  },
+};
+
+// ---------- crawl jobs in flight (resume after a restart) ----------
+export const jobs = {
+  async add(id, rec) {
+    await kv.set(`job:${id}`, JSON.stringify(rec), CFG.resumeMaxAgeMs + 60_000);
+    await kv.sAdd('jobs', id);
+  },
+  async remove(id) { await kv.del(`job:${id}`); await kv.sRem('jobs', id); },
+  async all() {
+    const out = [];
+    for (const id of await kv.sMembers('jobs')) {
+      const rec = parse(await kv.get(`job:${id}`));
+      if (rec) out.push({ id, ...rec }); else await kv.sRem('jobs', id);
+    }
+    return out;
+  },
 };

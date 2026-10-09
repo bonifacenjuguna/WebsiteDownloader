@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CFG } from './config.js';
+import { UserError } from './errors.js';
 import { localPathFor, sha1 } from './paths.js';
 
 export class Job {
@@ -14,6 +15,8 @@ export class Job {
     this.failed = [];
     this.totalBytes = 0;
     this.timedOut = false;
+    this.cancelled = false;
+    this.signal = limits.signal || null; // user pressed Cancel
     this.limits = {
       maxFiles: CFG.maxFiles, maxTotalBytes: CFG.maxTotalBytes, maxFileBytes: CFG.maxFileBytes,
       timeoutMs: CFG.jobTimeoutMs, fetchTimeoutMs: CFG.fetchTimeoutMs, ...limits,
@@ -25,8 +28,14 @@ export class Job {
   }
 
   expired() {
+    if (this.signal?.aborted) { this.cancelled = true; return true; }
     if (Date.now() > this.deadline) { this.timedOut = true; return true; }
     return false;
+  }
+
+  // called between phases: stops the job quickly when the user cancelled
+  throwIfCancelled() {
+    if (this.signal?.aborted || this.cancelled) throw new UserError('cancelled', 'cancelled');
   }
 
   async add(url, buf, type = '') {

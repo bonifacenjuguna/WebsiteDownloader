@@ -5,6 +5,8 @@ const SKIP = /^(data:|blob:|javascript:|about:|mailto:|tel:|sms:|#)/i;
 const ASSET_REL = /(stylesheet|icon|manifest|mask-icon|preload|modulepreload|image_src)/i;
 const CSS_URL = /url\(\s*(['"]?)(.*?)\1\s*\)/gi;
 const CSS_IMPORT = /@import\s+(['"])(.*?)\1/gi;
+const CSS_IMAGESET = /image-set\(([^)]*)\)/gi;   // image-set("a.png" 1x, "b.png" 2x): plain strings, no url()
+const CSS_STR = /(['"])(.*?)\1/g;
 const FROM = 'index.html';
 
 export function decodeBody(buf, contentType = '') {
@@ -35,11 +37,34 @@ export function relPath(from, to) {
 }
 
 export function parseSrcset(v) {
-  return String(v).split(/,\s+|,(?=\S+\s+\d)/).map((s) => s.trim()).filter(Boolean).map((s) => {
-    const [url, ...d] = s.split(/\s+/);
-    return { url, desc: d.join(' ') };
-  });
+  // WHATWG-style: a candidate is "url [descriptor]" and candidates are separated by a comma that follows whitespace,
+  // or by a comma right after a descriptor. A comma inside a URL (e.g. /img/w_300,h_200/a.jpg) is part of the URL.
+  const out = [];
+  const s = String(v).trim();
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s,]/.test(s[i])) i++;
+    if (i >= s.length) break;
+    let j = i;
+    while (j < s.length && !/\s/.test(s[j])) j++;
+    let url = s.slice(i, j);
+    let desc = '';
+    if (url.endsWith(',')) {
+      url = url.replace(/,+$/, ''); // "a.jpg, b.jpg": no descriptor
+    } else {
+      let k = j;
+      while (k < s.length && s[k] !== ',') k++;
+      desc = s.slice(j, k).trim();
+      j = k;
+    }
+    if (url) out.push({ url, desc });
+    i = j + 1;
+  }
+  return out;
 }
+
+const LAZY_ATTRS = ['data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-bg', 'data-background', 'data-background-image', 'data-image', 'data-poster', 'data-full', 'data-hi-res-src'];
+const LAZY_SRCSET = ['data-srcset', 'data-lazy-srcset'];
 
 function assetRefs($) {
   const out = [];
@@ -47,19 +72,33 @@ function assetRefs($) {
     if (ASSET_REL.test($(el).attr('rel') || '')) out.push([el, 'href', 'url']);
   });
   $('script[src]').each((_, el) => out.push([el, 'src', 'url']));
-  $('img,source,video,audio,track,input,image,embed,object').each((_, el) => {
-    for (const a of ['src', 'data-src', 'data-original', 'poster', 'data', 'xlink:href', 'href'])
+  $('img,source,video,audio,track,input,image,embed,object,use').each((_, el) => {
+    for (const a of ['src', 'poster', 'data', 'xlink:href', 'href'])
       if (el.attribs[a]) out.push([el, a, 'url']);
-    for (const a of ['srcset', 'data-srcset'])
-      if (el.attribs[a]) out.push([el, a, 'srcset']);
   });
-  return out;
+  // lazy-loading attributes on ANY element (div backgrounds, sliders, ...)
+  $(LAZY_ATTRS.map((a) => `[${a}]`).join(',')).each((_, el) => {
+    for (const a of LAZY_ATTRS) if (el.attribs[a] && !/^\s*[{\[]/.test(el.attribs[a])) out.push([el, a, 'url']);
+  });
+  $('img,source,[srcset],[data-srcset],[data-lazy-srcset]').each((_, el) => {
+    for (const a of ['srcset', ...LAZY_SRCSET]) if (el.attribs[a]) out.push([el, a, 'srcset']);
+  });
+  // an element can match two selectors: keep each (element, attribute) once
+  const seen = new WeakMap();
+  return out.filter(([el, a]) => {
+    const set = seen.get(el) || seen.set(el, new Set()).get(el);
+    if (set.has(a)) return false;
+    set.add(a);
+    return true;
+  });
 }
 
 export function cssRefs(css, base) {
   const out = new Set();
   for (const m of css.matchAll(CSS_URL)) { const u = resolveUrl(m[2], base); if (u) out.add(u); }
   for (const m of css.matchAll(CSS_IMPORT)) { const u = resolveUrl(m[2], base); if (u) out.add(u); }
+  for (const m of css.matchAll(CSS_IMAGESET))
+    for (const s of m[1].matchAll(CSS_STR)) { const u = resolveUrl(s[2], base); if (u) out.add(u); }
   return out;
 }
 
@@ -72,7 +111,8 @@ export function rewriteCss(css, base, from, map) {
   };
   return css
     .replace(CSS_URL, (m, q, u) => { const r = swap(u); return r ? `url("${r}")` : m; })
-    .replace(CSS_IMPORT, (m, q, u) => { const r = swap(u); return r ? `@import "${r}"` : m; });
+    .replace(CSS_IMPORT, (m, q, u) => { const r = swap(u); return r ? `@import "${r}"` : m; })
+    .replace(CSS_IMAGESET, (m, inner) => `image-set(${inner.replace(CSS_STR, (mm, q, u) => { const r = swap(u); return r ? `"${r}"` : mm; })})`);
 }
 
 export function discover($, base) {

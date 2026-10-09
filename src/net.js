@@ -45,16 +45,53 @@ export async function assertPublicHost(hostname) {
   cache.set(host, Date.now() + 60_000);
 }
 
-// fetch with manual redirects so every hop is SSRF-checked
-export async function safeFetch(urlStr, { timeoutMs = CFG.fetchTimeoutMs, headers = {}, maxRedirects = 5 } = {}) {
+// ---------- per-host politeness ----------
+// Requests to one host are spaced out. The gap doubles when the host answers 429/503 (and honours Retry-After),
+// then relaxes again while things go well, so the bot never hammers a small site and rarely gets blocked.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const gates = new Map(); // host -> { next, gap, seen }
+setInterval(() => {
+  const old = Date.now() - 10 * 60 * 1000;
+  for (const [h, g] of gates) if (g.seen < old) gates.delete(h);
+}, 5 * 60 * 1000).unref();
+
+async function gate(host) {
+  let g = gates.get(host);
+  if (!g) { g = { next: 0, gap: CFG.hostGapMs, seen: 0 }; gates.set(host, g); }
+  const now = Date.now();
+  g.seen = now;
+  const at = Math.max(now, g.next);
+  g.next = at + g.gap;
+  if (at > now) await sleep(at - now);
+}
+function penalize(host, res) {
+  const g = gates.get(host);
+  if (!g) return;
+  const ra = res.headers.get('retry-after');
+  let ms = Number(ra) * 1000;
+  if (!Number.isFinite(ms) && ra) ms = new Date(ra).getTime() - Date.now();
+  g.gap = Math.min(2000, Math.max(100, g.gap * 2));
+  g.next = Math.max(g.next, Date.now() + Math.min(Number.isFinite(ms) && ms > 0 ? ms : g.gap * 4, 10_000));
+}
+function relax(host) {
+  const g = gates.get(host);
+  if (g && g.gap > CFG.hostGapMs) g.gap = Math.max(CFG.hostGapMs, Math.floor(g.gap * 0.9));
+}
+export const hostGapNow = (host) => gates.get(host)?.gap ?? CFG.hostGapMs;
+
+// fetch with manual redirects so every hop is SSRF-checked (and spaced out per host)
+export async function safeFetch(urlStr, { timeoutMs = CFG.fetchTimeoutMs, headers = {}, maxRedirects = 5, signal } = {}) {
   let current = new URL(urlStr);
   for (let i = 0; i <= maxRedirects; i++) {
     await assertPublicHost(current.hostname);
+    await gate(current.host);
+    const timeout = AbortSignal.timeout(timeoutMs);
     const res = await fetch(current, {
       redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
       headers: { 'user-agent': CFG.ua, 'accept-language': 'en-US,en;q=0.9', ...headers },
     });
+    if (res.status === 429 || res.status === 503) penalize(current.host, res); else if (res.ok) relax(current.host);
     if ([301, 302, 303, 307, 308].includes(res.status)) {
       const loc = res.headers.get('location');
       if (!loc) return { res, url: current };

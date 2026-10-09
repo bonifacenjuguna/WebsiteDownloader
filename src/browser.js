@@ -3,6 +3,9 @@ import { assertPublicHost } from './net.js';
 import { resolveUrl } from './extract.js';
 import { Semaphore } from './queue.js';
 import { isTrackerUrl } from './trackers.js';
+import { isChallengeHtml, isBotWallHtml } from './analyze.js';
+import { notifyOnce } from './alerts.js';
+import { memoryShare } from './health-util.js';
 
 const KEEP = new Set(['stylesheet', 'script', 'image', 'font', 'media', 'manifest']);
 
@@ -19,15 +22,38 @@ async function ensure() {
   if (browser) return;
   launching ??= (async () => {
     const { chromium } = await import('playwright');
-    const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
-    b.on('disconnected', () => { if (browser === b) browser = null; });
+    const b = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-blink-features=AutomationControlled'] });
+    b.on('disconnected', () => { if (browser === b) { browser = null; crashes++; } });
     browser = b;
     served = 0;
-  })().finally(() => { launching = null; });
+  })().catch((e) => {
+    notifyOnce('browser-launch', `⚠️ Chromium failed to start: ${e?.message || e}`);
+    throw e;
+  }).finally(() => { launching = null; });
   await launching;
 }
 
+let crashes = 0;
+
+// Health numbers for /health and /stats
+export const browserStats = () => ({ up: !!browser, active, served, crashes });
+
+// Self-healing: close Chromium when the container is short on memory (only while idle), the next job starts a fresh one.
+export async function recycleIfBloated() {
+  if (!browser || active > 0) return false;
+  const share = memoryShare();
+  if (share != null && share >= CFG.memRecycleRatio) {
+    const old = browser;
+    browser = null;
+    console.warn(`[browser] memory at ${Math.round(share * 100)}% of the container: recycling Chromium`);
+    await old.close().catch(() => {});
+    return true;
+  }
+  return false;
+}
+
 async function acquire() {
+  await recycleIfBloated();
   // recycle periodically to keep memory flat, but never while a page is in use
   if (browser && active === 0 && served >= CFG.browserRecycleAfter) {
     const old = browser;
@@ -75,7 +101,17 @@ async function autoScroll(page) {
   });
 }
 
-export async function renderWithBrowser(job, url) {
+// Second rung of the ladder: look like an ordinary visitor (no automation hints) and wait for bot checks to clear.
+const STEALTH_JS = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  window.chrome = window.chrome || { runtime: {} };
+  const q = window.navigator.permissions && window.navigator.permissions.query;
+  if (q) window.navigator.permissions.query = (p) => (p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : q.call(window.navigator.permissions, p));
+`;
+
+export async function renderWithBrowser(job, url, { stealth = false } = {}) {
   const b = await acquire();
   let context;
   try {
@@ -83,7 +119,9 @@ export async function renderWithBrowser(job, url) {
       userAgent: CFG.ua,
       viewport: { width: 1366, height: 900 },
       serviceWorkers: 'block',
+      ...(stealth ? { locale: 'en-US', timezoneId: 'America/New_York', extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' } } : {}),
     });
+    if (stealth) await context.addInitScript(STEALTH_JS);
     await context.route('**/*', guard);
 
     const page = await context.newPage();
@@ -117,16 +155,26 @@ export async function renderWithBrowser(job, url) {
     } catch (e) {
       if (!/timeout/i.test(String(e?.message))) throw e;
     }
-    await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
-    await autoScroll(page).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => {});
-    await page.waitForTimeout(300);
-    await Promise.allSettled([...tasks]);
-
-    const html = await page.content();
+    await page.waitForLoadState('networkidle', { timeout: stealth ? 6000 : 4000 }).catch(() => {});
+    // a bot check often clears by itself after a few seconds in a real browser
+    const waitUntil = Date.now() + (stealth ? 15000 : 4000);
+    let html = await page.content();
+    while ((isChallengeHtml(html) || isBotWallHtml(html)) && Date.now() < waitUntil && Date.now() < job.deadline) {
+      await page.waitForTimeout(1500);
+      html = await page.content();
+    }
+    const challenge = isChallengeHtml(html) || isBotWallHtml(html);
+    if (!challenge) {
+      await autoScroll(page).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(300);
+      await Promise.allSettled([...tasks]);
+      html = await page.content();
+    }
     const originalHtml = mainResp ? await mainResp.text().catch(() => null) : null;
     return {
       html,
+      challenge,
       originalHtml,
       finalUrl: page.url(),
       status: mainResp?.status() ?? 200,

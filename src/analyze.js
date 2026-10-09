@@ -1,10 +1,26 @@
 import * as cheerio from 'cheerio';
-import { NOTES } from './copy.js';
 
 const CF_RE = /just a moment|cf-chl|challenge-platform|checking your browser|attention required! \| cloudflare|enable javascript and cookies to continue/i;
-const LOGIN_PATH = /\/(log-?in|sign-?in|signin|auth|sso|session\/new|accounts?\/login)(\/|$|\.|\?)/i;
+// other bot walls (CAPTCHA pages, Akamai, PerimeterX, DataDome, Imperva...)
+// STRICT: phrases that only appear on a wall. Safe to apply to any page (a contact form that mentions "captcha" is not a wall).
+const BOT_STRICT = /are you a (human|robot)|unusual traffic from your|verify you are (a )?human|press (&amp; |and )?hold|px-captcha|datadome|pardon our interruption|reference #\d+\.[0-9a-f]+|incapsula incident|request unsuccessful/i;
+// LOOSE: broader words, only trusted together with a 403/429/503 status
+const BOT_LOOSE = /captcha|access denied|request blocked|perimeterx|incapsula|imperva|akamai|automated (access|requests)/i;
+const GEO_RE = /not available in your (country|region|location)|unavailable in your (country|region|location)|isn'?t available in your (country|region)|blocked in your (country|region)|geo-?restrict|due to legal (reasons|demands)|451 unavailable/i;
+export const LOGIN_PATH = /\/(log-?in|sign-?in|signin|auth|sso|session\/new|accounts?\/login)(\/|$|\.|\?)/i;
 
 export const isChallengeHtml = (html) => CF_RE.test(html.slice(0, 100000));
+export const isBotWallHtml = (html, loose = false) => {
+  const head = html.slice(0, 60000);
+  return (BOT_STRICT.test(head) || (loose && BOT_LOOSE.test(head))) && visibleTextLength(html) < 1500;
+};
+export const isGeoHtml = (html) => GEO_RE.test(html.slice(0, 60000));
+
+export function visibleTextLength(html) {
+  const $ = cheerio.load(html);
+  $('script,style,noscript,template').remove();
+  return $('body').text().replace(/\s+/g, ' ').trim().length;
+}
 
 export function looksLikeSpa(html) {
   const $ = cheerio.load(html);
@@ -16,17 +32,34 @@ export function looksLikeSpa(html) {
   return (text.length < 200 && scripts > 0) || (emptyRoot && text.length < 500) || noscriptMsg;
 }
 
+// Static HTML that is nearly empty but loads scripts: probably rendered by JavaScript.
+export function looksThin(html) {
+  const $ = cheerio.load(html);
+  const scripts = $('script[src]').length;
+  $('script,style,noscript,template').remove();
+  const text = $('body').text().replace(/\s+/g, ' ').trim().length;
+  return text < 600 && scripts >= 1;
+}
+
+// Warnings are plain codes ({ c, n? }); the wording lives in copy.js so it can be translated at send time.
+// `challenge` means "a real browser might get through"; `code` is what the user sees if it does not.
 export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml }) {
   const warnings = [];
   const host = new URL(finalUrl).host;
 
   if (headers.get('cf-mitigated') === 'challenge' || ([403, 429, 503].includes(status) && isChallengeHtml(html)))
-    return { challenge: true, code: 'cloudflare', fatal: `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors, so I can't download it.`, warnings };
+    return { challenge: true, kind: 'cloudflare', code: 'cloudflare', fatal: `🛡️ ${host} is behind a Cloudflare challenge that blocks automated visitors.`, warnings };
+
+  if (status === 451 || ([401, 403].includes(status) && isGeoHtml(html)))
+    return { code: 'geo_blocked', fatal: `🌍 ${host} is not available from this server's region.`, warnings };
+
+  if ([403, 429, 503].includes(status) && isHtml && isBotWallHtml(html, true))
+    return { challenge: true, kind: 'bot', code: 'bot_blocked', fatal: `🤖 ${host} blocks automated visitors (bot protection).`, warnings };
 
   const hasBody = isHtml && html.length > 400;
   if (status === 401 || status === 403) {
     if (hasBody) {
-      warnings.push(status === 401 ? NOTES.signIn : NOTES.restricted);
+      warnings.push({ c: status === 401 ? 'signIn' : 'restricted' });
     } else {
       return {
         code: headers.get('www-authenticate') ? 'auth' : 'forbidden',
@@ -48,19 +81,8 @@ export function analyze({ status, headers, html, requestedUrl, finalUrl, isHtml 
 
   const reqPath = new URL(requestedUrl).pathname;
   const finPath = new URL(finalUrl).pathname;
-  if (LOGIN_PATH.test(finPath) && !LOGIN_PATH.test(reqPath))
-    warnings.push(NOTES.signIn);
-  else if (/<input[^>]+type\s*=\s*["']?password/i.test(html))
-    warnings.push(NOTES.signInForm);
+  if (LOGIN_PATH.test(finPath) && !LOGIN_PATH.test(reqPath)) warnings.push({ c: 'signIn' });
+  else if (/<input[^>]+type\s*=\s*["']?password/i.test(html)) warnings.push({ c: 'signInForm' });
 
   return { fatal: null, warnings };
-}
-
-// Static HTML that is nearly empty but loads scripts: probably rendered by JavaScript.
-export function looksThin(html) {
-  const $ = cheerio.load(html);
-  const scripts = $('script[src]').length;
-  $('script,style,noscript,template').remove();
-  const text = $('body').text().replace(/\s+/g, ' ').trim().length;
-  return text < 600 && scripts >= 1;
 }

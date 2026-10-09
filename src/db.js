@@ -45,6 +45,17 @@ const MIGRATIONS = [
   `
   ALTER TABLE downloads ADD COLUMN title TEXT, ADD COLUMN timings JSONB;
   `,
+  // v1.6: per-user language and retention, anonymous owner for cleared history, admin domain block list
+  `
+  ALTER TABLE users ADD COLUMN retention_days INT, ADD COLUMN lang TEXT;
+  INSERT INTO users (telegram_id, first_name) VALUES (0, 'anonymous') ON CONFLICT DO NOTHING;
+  CREATE INDEX downloads_user_key_idx ON downloads (user_id, url_key);
+  CREATE TABLE blocked_domains (
+    domain     TEXT PRIMARY KEY,
+    added_by   BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  `,
 ];
 
 export const enabled = () => pool !== null;
@@ -107,7 +118,7 @@ export async function touchUser(from) {
      ON CONFLICT (telegram_id) DO UPDATE
        SET username = EXCLUDED.username, first_name = EXCLUDED.first_name,
            last_seen = now(), requests = users.requests + 1
-     RETURNING banned`,
+     RETURNING banned, lang`,
     [from.id, from.username || null, from.first_name || null]
   );
   return r?.[0] || null;
@@ -148,6 +159,66 @@ export async function history(userId, limit = 8) {
   )) || [];
 }
 
+export async function historyCount(userId) {
+  const r = await q(`SELECT count(DISTINCT url_key) AS n FROM downloads WHERE user_id = $1 AND status = 'ok' AND tg_file_id IS NOT NULL`, [userId]);
+  return Number(r?.[0]?.n || 0);
+}
+
+// "Removing" history = unlinking it from the person. Rows that only recorded a cached resend or a failure are deleted.
+// A real build stays, owned by nobody (user 0), because its Telegram file is the shared cache other users get instantly;
+// it holds no link to the person who asked.
+async function unlink(cond, params) {
+  await q(`DELETE FROM downloads WHERE ${cond} AND (cached = true OR status <> 'ok' OR tg_file_id IS NULL)`, params);
+  const r = await q(`UPDATE downloads SET user_id = 0 WHERE ${cond} RETURNING id`, params);
+  return r?.length ?? 0;
+}
+
+// one entry (every row of that site for this user)
+export async function removeHistoryItem(id, userId) {
+  const r = await q('SELECT url_key FROM downloads WHERE id = $1 AND user_id = $2', [id, userId]);
+  if (!r?.length) return false;
+  await unlink('user_id = $1 AND url_key = $2', [userId, r[0].url_key]);
+  return true;
+}
+
+export const clearHistory = (userId) => unlink('user_id = $1', [userId]);
+
+// "Delete all my data": history unlinked, name and settings wiped. The users row stays (a ban must survive it).
+export async function purgeUser(userId) {
+  await unlink('user_id = $1', [userId]);
+  await q('UPDATE users SET username = NULL, first_name = NULL, retention_days = NULL, lang = NULL WHERE telegram_id = $1', [userId]);
+  return true;
+}
+
+export async function getRetention(userId) {
+  const r = await q('SELECT retention_days FROM users WHERE telegram_id = $1', [userId]);
+  return r?.[0] ? r[0].retention_days : null;
+}
+// days: null = default, 0 = never delete automatically
+export async function setRetention(userId, days) {
+  const r = await q('UPDATE users SET retention_days = $2 WHERE telegram_id = $1 RETURNING telegram_id', [userId, days]);
+  return !!r?.length;
+}
+
+export async function getLang(userId) {
+  const r = await q('SELECT lang FROM users WHERE telegram_id = $1', [userId]);
+  return r?.[0]?.lang || null;
+}
+export async function setLang(userId, lang) { await q('UPDATE users SET lang = $2 WHERE telegram_id = $1', [userId, lang]); }
+
+// ---------- admin domain block list ----------
+export async function blockedDomains() {
+  return ((await q('SELECT domain FROM blocked_domains ORDER BY domain')) || []).map((r) => r.domain);
+}
+export async function blockDomain(domain, by) {
+  const r = await q('INSERT INTO blocked_domains (domain, added_by) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING domain', [domain, by]);
+  return r !== null;
+}
+export async function unblockDomain(domain) {
+  const r = await q('DELETE FROM blocked_domains WHERE domain = $1 RETURNING domain', [domain]);
+  return !!r?.length;
+}
+
 export async function isBanned(id) {
   const r = await q('SELECT banned FROM users WHERE telegram_id = $1', [id]);
   return !!r?.[0]?.banned;
@@ -175,7 +246,7 @@ export async function setBanned(id, banned) {
 
 export async function stats() {
   const main = await q(
-    `SELECT (SELECT count(*) FROM users) AS users,
+    `SELECT (SELECT count(*) FROM users WHERE telegram_id <> 0) AS users,
             count(*) AS total,
             count(*) FILTER (WHERE status = 'ok') AS ok,
             count(*) FILTER (WHERE cached) AS cached,
@@ -192,7 +263,7 @@ export async function stats() {
             round(avg((timings->>'assets')::numeric))::int  AS assets,
             round(avg((timings->>'zip')::numeric))::int     AS zip,
             round(avg((timings->>'upload')::numeric))::int  AS upload,
-            count(*) FILTER (WHERE mode = 'browser')        AS browser_jobs,
+            count(*) FILTER (WHERE mode LIKE '%browser%')    AS browser_jobs,
             count(*)                                        AS jobs
        FROM downloads
       WHERE status = 'ok' AND NOT cached AND timings IS NOT NULL AND created_at > now() - interval '7 days'`
@@ -200,8 +271,15 @@ export async function stats() {
   return { ...main[0], hosts: hosts || [], errors: errors || [], phases: phases?.[0] || null };
 }
 
+// Old rows are deleted after RETENTION_DAYS, or after the number of days a person chose in /privacy (0 = keep).
 export function startRetention() {
-  const run = () => q(`DELETE FROM downloads WHERE created_at < now() - make_interval(days => $1::int)`, [Math.floor(CFG.retentionDays)]);
+  const run = () => q(
+    `DELETE FROM downloads d USING users u
+      WHERE u.telegram_id = d.user_id
+        AND ((u.retention_days IS NULL AND d.created_at < now() - make_interval(days => $1::int))
+          OR (u.retention_days > 0   AND d.created_at < now() - make_interval(days => u.retention_days)))`,
+    [Math.floor(CFG.retentionDays)]
+  );
   setTimeout(run, 60_000).unref();
-  setInterval(run, 24 * 60 * 60 * 1000).unref();
+  setInterval(run, 6 * 60 * 60 * 1000).unref();
 }
