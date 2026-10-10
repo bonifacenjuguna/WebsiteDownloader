@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.1 - One place for every setting
+- **`.env` included.** Every variable the bot reads, grouped, with a one-line explanation above each and the built-in default as its value (blank = off). It behaves exactly like having no file at all, so you change only what you need: on Railway paste just those lines into *Variables -> Raw Editor*; locally run `npm run dev`. `.env` stays out of git and the Docker image (`.gitignore`, `.dockerignore`).
+- **One source of truth:** `scripts/env-vars.js`. `npm run env` regenerates `.env`, `.env.example` and the new configuration reference table in the README (every variable, its default and what it does).
+- **Can't drift:** `npm test` now fails if the code reads a variable that is not documented, if a documented variable is never read, if `.env` or the README table is stale, or if any default in `.env` differs from what the code actually uses (checked by loading the real config both ways). 35 tests.
+- `.env.example` rewritten from the same list (it had stale defaults such as a 6-hour cache and 2 browser pages at once). Variables that were read by the code but never documented (`BOT_NAME`, `PROFILE_SYNC`, `ADMIN_NOTIFY`, `MAX_TOTAL_MB`, `MAX_FILES`, `JOB_TIMEOUT_SEC`, `HEALTH`, `HEALTH_PORT`, `LOG_FORMAT`, ...) are now listed.
+- New scripts: `npm run dev` (loads `.env`) and `npm run env`. Node requirement raised to 20.6 (needed for `--env-file`).
+- README: new *Configuration* section, version headings cleaned up.
+
 ## 1.8.0 - Faster, lighter, no-gap deploys
 **Speed**
 - **Downloads are one pipeline.** A stylesheet is read the moment it arrives and the files it names (fonts, images, `@import`) join the queue immediately, instead of waiting for a whole "round" to finish. Concurrency is 24 files (`ASSET_CONCURRENCY`) and 8 pages (`PAGE_CONCURRENCY`).
