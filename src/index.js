@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { Telegraf, Telegram, Markup } from 'telegraf';
 import { CFG } from './config.js';
 import { normalizeUrl, extractUrls, urlKey, sectionKey, bareHost } from './url.js';
@@ -9,7 +10,7 @@ import { downloadWebsite } from './site.js';
 import { JobQueue } from './queue.js';
 import { UserError, explainNetError } from './errors.js';
 import { assertPublicHost } from './net.js';
-import { warmBrowser, closeBrowser, screenshotPage, browserSem, browserStats } from './browser.js';
+import { warmBrowser, verifyBrowser, closeBrowser, screenshotPage, browserSem, browserStats } from './browser.js';
 import { makeUpdater } from './updater.js';
 import { syncProfile } from './profile.js';
 import { renderMenu, renderPage } from './help.js';
@@ -21,6 +22,10 @@ import * as fingerprint from './fingerprint.js';
 import * as resume from './resume.js';
 import { startHealth } from './health.js';
 import { setNotifier, recordJob } from './alerts.js';
+import * as metrics from './metrics.js';
+import * as log from './log.js';
+import * as sharedCache from './sharedcache.js';
+import { startHousekeeping, canStartMore, diskFreeMb } from './housekeeping.js';
 import { syncCommands } from './commands.js';
 import { memoryShare, memoryMb } from './health-util.js';
 import { esc, b, i, code, dot, ms as fmtMs, uptime as fmtUptime, utc, table, stripTags } from './fmt.js';
@@ -52,11 +57,19 @@ Telegram.prototype.callApi = async function callApi(method, payload = {}, ...res
   }
 };
 
-const bot = new Telegraf(CFG.token, { handlerTimeout: 10 * 60 * 1000 });
-const queue = new JobQueue(CFG.queueConcurrency, CFG.queueMaxWaiting);
+const bot = new Telegraf(CFG.token, {
+  handlerTimeout: 10 * 60 * 1000,
+  ...(CFG.telegramApiRoot ? { telegram: { apiRoot: CFG.telegramApiRoot } } : {}), // self-hosted Bot API: files up to 2 GB
+});
+// extra parallel jobs wait while memory or disk is short (the first job always runs)
+const queue = new JobQueue(CFG.queueConcurrency, CFG.queueMaxWaiting, canStartMore);
 // flight key -> { promise, controller, members: Map<userId, member> }: identical requests share one build
 const flights = new Map();
 let stopping = false;
+let stopHttp = null;
+let stopHousekeeping = null;
+let stopSharedCache = null;
+let mode = 'polling'; // or 'webhook'
 const startedAt = Date.now();
 
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
@@ -258,18 +271,22 @@ bot.command('stats', async (ctx) => {
   ];
   if (st) {
     const success = pct(st.ok, st.total);
+    const real = st.ok7 + st.ours7 ? Math.round((st.ok7 / (st.ok7 + st.ours7)) * 100) : null;
+    const sc = sharedCache.stats();
     lines.push(
       '', b('Activity'),
       `👥 Users  ${code(st.users)}`,
       `📥 Downloads  ${code(st.total)}  ·  last 24h ${code(st.last24h)}`,
-      `${dot(success, 80, 60, true)} Success  ${code(pctText(success))}`,
+      `${dot(success, 80, 60, true)} Success  ${code(pctText(success))}  ${i('all time, every failure counted')}`,
+      `${dot(real, 90, 75, true)} Real success  ${code(pctText(real))}  ${i('7 days, without typos, private addresses and protected sites')}`,
       `⚡ Cache hits  ${code(pctText(pct(st.cached, st.total)))}`,
-      `⏱ Average build  ${code(fmtMs(st.avg_ms))}`
+      `⏱ Build time  median ${code(fmtMs(st.p50))}  ·  95% under ${code(fmtMs(st.p95))}  ${i('7 days')}`,
+      ...(sc.enabled && sc.hits + sc.misses ? [`🧩 Shared cache  ${code(pctText(pct(sc.hits, sc.hits + sc.misses)))} of library files reused`] : []),
     );
     const p = st.phases;
-    if (p && Number(p.jobs) > 0) {
+    if (p?.rows?.length) {
       lines.push('', `${b('Where the time goes')}  ${i(`7 days · ${p.jobs} builds · ${pctText(pct(p.browser_jobs, p.jobs))} used the browser`)}`,
-        table([['fetch', fmtMs(p.fetch)], ['browser', fmtMs(p.browser)], ['assets', fmtMs(p.assets)], ['zip', fmtMs(p.zip)], ['upload', fmtMs(p.upload)]]));
+        table([['phase', 'median / 95%'], ...p.rows.map((r) => [r.name, `${fmtMs(r.p50)} / ${fmtMs(r.p95)}`])]));
     }
     if (st.hosts.length) lines.push(b('Top sites') + `  ${i('7 days')}`, ...st.hosts.map((h, n) => `${n + 1}. ${esc(h.host)}  ·  ${code(h.c)}`), '');
     if (st.errors.length) lines.push(b('Top failures') + `  ${i('7 days')}`, ...st.errors.map((e) => `• ${esc(e.code)}  ·  ${code(e.c)}`));
@@ -300,6 +317,7 @@ bot.command('ping', async (ctx) => {
   const tg = Date.now() - t0; // a full round trip to Telegram
   const [redis, pg] = await Promise.all([timeIt(() => kv.get('ping')), db.enabled() ? timeIt(() => db.ping()) : Promise.resolve(undefined)]);
   const br = browserStats();
+  const sc = sharedCache.stats();
   const share = memoryShare();
   const lat = (v) => (v === undefined ? `${code('off')} 🟡` : v === null ? `${code('error')} 🔴` : `${code(fmtMs(v))} ${dot(v, 100, 500)}`);
   const text = [
@@ -311,8 +329,13 @@ bot.command('ping', async (ctx) => {
     b('Resources'),
     `💾 Memory  ${code(`${memoryMb()} MB`)}${share == null ? '' : `  ·  container ${code(`${Math.round(share * 100)}%`)} ${dot(share * 100, 70, 85)}`}`,
     `🗄 Redis ${kvMode === 'redis' ? lat(redis) : `${code('memory only')} 🟡`}  ·  Postgres ${lat(pg)}`,
-    `🧭 Chromium ${br.up ? '🟢 up' : '⚪ idle'}  ·  ${br.active} active  ·  ${br.served} served  ·  ${br.crashes} crashes`,
-    `🚦 Queue  ${queue.active} active  ·  ${queue.waiting.length} waiting  ·  ${flights.size} in flight`,
+    `💽 Disk free  ${diskFreeMb() == null ? code('?') : `${code(`${diskFreeMb()} MB`)} ${dot(diskFreeMb(), 1500, 700, true)}`}`,
+    `🧭 Chromium ${br.up ? '🟢 up' : '⚪ idle'}${br.onDemand ? ' (on demand)' : ''}  ·  ${br.active} active  ·  ${br.served} served  ·  ${br.crashes} crashes`,
+    '',
+    b('Work'),
+    `🚦 Queue  ${queue.active} active  ·  ${queue.waiting.length} waiting  ·  ${flights.size} in flight${queue.throttled ? `  ·  ${queue.throttled} paused for resources` : ''}`,
+    `🧩 Shared cache  ${sc.enabled ? `${code(`${sc.hits} hits`)}  ·  ${code(`${Math.round(sc.approxBytes / 1048576)} MB`)}` : code('off')}`,
+    `📡 Updates by ${b(mode)}${CFG.telegramApiRoot ? '  ·  local Bot API' : ''}`,
   ].join('\n');
   await ctx.telegram.editMessageText(ctx.chat.id, m.message_id, undefined, text).catch(() => ctx.reply(text));
 });
@@ -469,15 +492,18 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
   ]);
   if (user?.banned && !admin) return ctx.reply(L.MSG.banned);
 
-  // "Fresh copy" is incremental: ask the site whether anything changed before rebuilding everything
-  if (force && !resumed) {
-    const prev = await cache.getResult(key);
-    if (prev) {
+  // Reuse without rebuilding. "Fresh copy", and copies past their freshness window, are re-checked with the site
+  // (conditional requests, no asset downloads); when nothing changed the saved copy is simply sent again.
+  if (!resumed && (force || (!hit && !neg))) {
+    const prev = (force ? await cache.getResult(key) : null) ?? (await cache.getStale(key));
+    if (prev && (await fingerprint.available(key))) {
       const note = await ctx.reply(L.STATUS.changes).catch(() => null);
       const verdict = await fingerprint.probe(key).catch(() => null);
       if (note) ctx.telegram.deleteMessage(ctx.chat.id, note.message_id).catch(() => {});
       if (verdict === 'unchanged' && (await sendStored(ctx, prev, 'unchanged', L))) {
-        await ctx.reply(L.MSG.unchanged).catch(() => {});
+        cache.setResult(key, prev); // fresh again for the next person
+        if (force) await ctx.reply(L.MSG.unchanged).catch(() => {});
+        metrics.inc('wd_cache_total', { kind: force ? 'fresh_unchanged' : 'revalidated' });
         db.record({ ...base, status: 'ok', mode: prev.mode, cached: true, files: prev.files, zipBytes: prev.zipBytes, durationMs: 0, fileId: prev.fileId, fileName: prev.fileName, caption: prev.caption, title: prev.title });
         return;
       }
@@ -488,6 +514,7 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
 
   if (hit) {
     if (await sendStored(ctx, hit, 'cache', L)) {
+      metrics.inc('wd_cache_total', { kind: 'fresh' });
       db.record({ ...base, status: 'ok', mode: hit.mode, cached: true, files: hit.files, zipBytes: hit.zipBytes, durationMs: 0, fileId: hit.fileId, fileName: hit.fileName, caption: hit.caption, title: hit.title });
       return;
     }
@@ -563,6 +590,7 @@ async function build(ctx, parsed, key, base, opts) {
   const update = makeUpdater(ctx, status, cancelKb);
   f.members.set(uid, { leader, update, cancelled: false });
 
+  let keepRegistered = false; // set when a shutdown interrupts the job: the next start resumes it
   // remember the job so a restart can pick it up again
   const recId = opts.rec?.id || `${key}:${uid}:${started}`;
   await resume.register(recId, {
@@ -587,12 +615,17 @@ async function build(ctx, parsed, key, base, opts) {
       durationMs: Date.now() - started, fileId: data.fileId, fileName: data.fileName, caption: data.caption,
       title: data.title, timings: leader ? data.timings : null,
     });
-    if (leader) recordJob(true);
+    if (leader) {
+      recordJob(true);
+      metrics.inc('wd_jobs_total', { result: 'ok', mode: data.mode });
+      metrics.observe('wd_job_seconds', (Date.now() - started) / 1000);
+      log.event('job', { host: parsed.url.host, ok: true, mode: data.mode, ms: Date.now() - started, files: data.files, bytes: data.zipBytes, timings: data.timings });
+    } else metrics.inc('wd_cache_total', { kind: 'shared' });
     if (!admin) policy.strikes.clear(uid);
     return true;
   } catch (e) {
     // the process is shutting down (deploy): say nothing and keep the job registered, the next start resumes it
-    if (stopping) return false;
+    if (stopping) { keepRegistered = true; return false; }
     const code = codeOf(e);
     if (code === 'cancelled') {
       update(S.cancelled, null);
@@ -602,7 +635,8 @@ async function build(ctx, parsed, key, base, opts) {
     // precise detail stays in the logs and database; the user gets a short human message
     const text = L.errorText(code);
     if (code === 'internal') console.error('job failed:', e);
-    else console.warn(`[job] ${code} ${parsed.url.host}: ${e?.message}`);
+    else log.event('job', { host: parsed.url.host, ok: false, code, ms: Date.now() - started, detail: e?.message }, 'warn');
+    metrics.inc('wd_jobs_total', { result: 'failed', code });
     cache.rememberUrl(key, parsed.url.href); // lets the Try again button find the link
     update(text, failureMarkup(L, code, key));
     if (leader && e instanceof UserError) cache.setNegative(key, { message: text, code }, code === 'zip_too_big' ? 6 * 60 * 60 * 1000 : CFG.negTtlMs);
@@ -613,7 +647,7 @@ async function build(ctx, parsed, key, base, opts) {
     return false;
   } finally {
     f.members.delete(uid);
-    if (!stopping) resume.finish(recId);
+    if (!keepRegistered) resume.finish(recId);
   }
 }
 
@@ -685,18 +719,21 @@ async function notifyAdmins(text) {
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // "I'm online": version, what is connected, and how many interrupted jobs were picked up again
-async function announceStartup(warm, resumed) {
+async function announceStartup(warm, resumed, webhookFellBack) {
   if (!CFG.adminNotify || !CFG.adminIds.length) return;
   if (!(await kv.setNx('boot-notice', '1', 20_000))) return; // a crash loop must not spam admins
   const ready = CFG.enableBrowser ? (await Promise.race([warm, sleepMs(25_000).then(() => 'slow')])) === true : null;
   let username = '';
   try { username = ` @${(await bot.telegram.getMe()).username}`; } catch { /* still online */ }
   const ok = (v) => (v ? '🟢' : '🟡');
+  const chromium = ready === null ? '⚪ Chromium off' : `${ok(ready)} Chromium${ready ? (CFG.browserWarm ? '' : ' (on demand)') : ' not ready'}`;
   await notifyAdmins([
     `🟢 ${b(`Website Downloader v${pkg.version}`)} is online${esc(username)}`,
     i(utc(Date.now())),
     '',
-    `${ok(kvMode === 'redis')} Redis  ·  ${ok(db.enabled())} Postgres  ·  ${ready === null ? '⚪ Chromium off' : `${ok(ready)} Chromium${ready ? '' : ' not ready'}`}`,
+    `${ok(kvMode === 'redis')} Redis  ·  ${ok(db.enabled())} Postgres  ·  ${chromium}`,
+    `📡 Updates by ${b(mode)}${CFG.telegramApiRoot ? '  ·  🗄 local Bot API (2 GB files)' : ''}`,
+    ...(webhookFellBack ? [`⚠️ ${i('WEBHOOK_DOMAIN is set but the public address did not answer, so I am using polling. Check the domain and PORT.')}`] : []),
     ...(resumed ? [`🔄 Resuming ${b(resumed)} interrupted job${resumed === 1 ? '' : 's'}`] : []),
     '',
     i('Send /ping for live health.'),
@@ -715,12 +752,29 @@ async function main() {
   const blockedCount = await policy.loadBlocked();
   if (blockedCount) console.log(`Blocked domains: ${blockedCount}`);
   setNotifier((text) => notifyAdmins(text));
-  startHealth(() => ({
-    version: pkg.version, stopping, queue: { active: queue.active, waiting: queue.waiting.length, flights: flights.size },
-    redis: kvMode, postgres: db.enabled(),
-  }));
+  stopHousekeeping = startHousekeeping();
+  stopSharedCache = sharedCache.startSharedCache();
+
+  // Webhook mode (WEBHOOK_DOMAIN): Telegram delivers updates to this service, so a deploy never drops messages.
+  // Without it the bot long-polls, which is simplest but leaves a gap while a new version starts.
+  let hook = null;
+  if (CFG.webhookDomain && CFG.healthEnabled && CFG.healthPort) {
+    const id = crypto.createHash('sha256').update(CFG.token).digest('hex');
+    hook = { path: `/tg/${id.slice(0, 24)}`, secret: id.slice(24, 56) };
+    bot.botInfo = await bot.telegram.getMe();
+    hook.handler = bot.webhookCallback(hook.path, { secretToken: hook.secret });
+  }
+  stopHttp = startHealth(
+    () => ({
+      version: pkg.version, stopping, mode, queue: { active: queue.active, waiting: queue.waiting.length, flights: flights.size },
+      redis: kvMode, postgres: db.enabled(),
+    }),
+    { webhook: hook, gauges: metricGauges },
+  );
+
+  // Chromium starts on demand and closes when idle. A one-time check at startup tells you now if it cannot start.
   const warm = CFG.enableBrowser
-    ? warmBrowser().then(() => { console.log('Chromium warmed up'); return true; }).catch((e) => { console.error('Chromium warm-up failed:', e.message); return false; })
+    ? (CFG.browserWarm ? warmBrowser() : verifyBrowser()).then(() => { console.log(`Chromium ${CFG.browserWarm ? 'warmed up' : 'checked (starts on demand)'}`); return true; }).catch((e) => { console.error('Chromium check failed:', e.message); return false; })
     : Promise.resolve(false);
 
   // the menu stays short; everything else still works when typed
@@ -746,19 +800,68 @@ async function main() {
 
   syncProfile(bot.telegram).catch((e) => console.error('Profile sync failed:', e?.message));
 
-  bot.launch({ dropPendingUpdates: true }).catch((e) => { console.error(e); process.exit(1); });
-  console.log('Website Downloader (@WebsiteDownloaderBot) is running.');
+  let webhookFellBack = false;
+  if (hook) {
+    try {
+      await webhookReachable(`https://${CFG.webhookDomain}/health`);
+      await bot.telegram.setWebhook(`https://${CFG.webhookDomain}${hook.path}`, {
+        secret_token: hook.secret, allowed_updates: ['message', 'callback_query'], max_connections: 40,
+      });
+      mode = 'webhook'; // pending updates are kept: nothing sent during a deploy is lost
+    } catch (e) {
+      console.error('Webhook setup failed, falling back to polling:', e?.message);
+      webhookFellBack = true;
+    }
+  }
+  if (mode !== 'webhook') {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+    bot.launch({ dropPendingUpdates: true }).catch((e) => { console.error(e); process.exit(1); });
+  }
+  console.log(`Website Downloader is running (${mode}).`);
   const resumed = await resumeJobs().catch((e) => { console.error('resume error:', e?.message); return 0; });
-  announceStartup(warm, resumed).catch((e) => console.warn('startup notice failed:', e?.message));
+  announceStartup(warm, resumed, webhookFellBack).catch((e) => console.warn('startup notice failed:', e?.message));
+}
+
+// the public address must really reach this service before Telegram is told to use it
+async function webhookReachable(url) {
+  let last;
+  for (let n = 0; n < 6; n++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (r.ok) return;
+      last = new Error(`HTTP ${r.status}`);
+    } catch (e) { last = e; }
+    await sleepMs(3000); // a fresh deploy can take a moment to be routed
+  }
+  throw last;
+}
+
+// numbers for GET /metrics
+function metricGauges() {
+  const br = browserStats();
+  const sc = sharedCache.stats();
+  return {
+    wd_queue_active: queue.active, wd_queue_waiting: queue.waiting.length, wd_flights: flights.size,
+    wd_queue_throttled_total: queue.throttled, wd_uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
+    wd_memory_rss_mb: memoryMb(), wd_container_memory_ratio: memoryShare(), wd_disk_free_mb: diskFreeMb(),
+    wd_browser_up: br.up ? 1 : 0, wd_browser_active: br.active, wd_browser_crashes_total: br.crashes,
+    wd_shared_cache_hits_total: sc.hits, wd_shared_cache_misses_total: sc.misses, wd_shared_cache_mb: Math.round(sc.approxBytes / 1048576),
+  };
 }
 
 async function shutdown(sig) {
   if (stopping) return;
   stopping = true;
-  setTimeout(() => process.exit(0), 8000).unref();
+  setTimeout(() => process.exit(0), CFG.drainMs + 3000).unref();
   // tell admins before going quiet (deploys send SIGTERM); jobs in flight are picked up again by the next start
   await Promise.race([notifyAdmins(`🔴 ${b(`Website Downloader v${pkg.version} is shutting down`)}\n${i(`${sig} after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`)}`), sleepMs(3000)]);
-  try { bot.stop(sig); } catch { /* not started */ }
+  stopHttp?.();                                    // no new webhook calls: Telegram retries them on the new instance
+  try { bot.stop(sig); } catch { /* not started, or webhook mode */ }
+  // drain: running jobs get a short window to finish and deliver; whatever is left resumes after the restart
+  const until = Date.now() + CFG.drainMs;
+  while (flights.size && Date.now() < until) await sleepMs(250);
+  stopHousekeeping?.();
+  stopSharedCache?.();
   await Promise.allSettled([closeBrowser(), closeStore(), db.shutdown()]);
   process.exit(0);
 }

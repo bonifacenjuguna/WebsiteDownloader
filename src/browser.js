@@ -36,7 +36,7 @@ async function ensure() {
 let crashes = 0;
 
 // Health numbers for /health and /stats
-export const browserStats = () => ({ up: !!browser, active, served, crashes });
+export const browserStats = () => ({ up: !!browser, active, served, crashes, onDemand: !CFG.browserWarm });
 
 // Self-healing: close Chromium when the container is short on memory (only while idle), the next job starts a fresh one.
 export async function recycleIfBloated() {
@@ -52,7 +52,23 @@ export async function recycleIfBloated() {
   return false;
 }
 
+// Chromium costs ~300 MB while it is up, so it is closed after a quiet spell and started again on demand.
+let idleTimer = null;
+function scheduleIdleClose() {
+  clearTimeout(idleTimer);
+  if (!browser || active > 0 || CFG.browserWarm) return;
+  idleTimer = setTimeout(async () => {
+    if (!browser || active > 0) return;
+    const old = browser;
+    browser = null;
+    console.log('[browser] idle: closing Chromium to free memory');
+    await old.close().catch(() => {});
+  }, CFG.browserIdleMs);
+  idleTimer.unref();
+}
+
 async function acquire() {
+  clearTimeout(idleTimer);
   await recycleIfBloated();
   // recycle periodically to keep memory flat, but never while a page is in use
   if (browser && active === 0 && served >= CFG.browserRecycleAfter) {
@@ -68,7 +84,13 @@ async function acquire() {
 }
 
 export async function warmBrowser() { await ensure(); }
-export async function closeBrowser() { if (browser) await browser.close().catch(() => {}); browser = null; }
+// Startup check: can Chromium start at all? When it is not meant to stay warm it is closed again right away.
+export async function verifyBrowser() {
+  await ensure();
+  if (!CFG.browserWarm && active === 0) { const old = browser; browser = null; await old?.close().catch(() => {}); }
+  return true;
+}
+export async function closeBrowser() { clearTimeout(idleTimer); if (browser) await browser.close().catch(() => {}); browser = null; }
 
 // every request the browser makes goes through the SSRF check; trackers are dropped for speed
 async function guard(route) {
@@ -183,6 +205,7 @@ export async function renderWithBrowser(job, url, { stealth = false } = {}) {
   } finally {
     await context?.close().catch(() => {});
     active--;
+    scheduleIdleClose();
   }
 }
 
@@ -209,5 +232,6 @@ export async function screenshotPage(url) {
   } finally {
     await context?.close().catch(() => {});
     active--;
+    scheduleIdleClose();
   }
 }

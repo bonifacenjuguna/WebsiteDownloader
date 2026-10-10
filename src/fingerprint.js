@@ -2,11 +2,12 @@ import crypto from 'node:crypto';
 import { kv } from './store.js';
 import { fetchHtml } from './fetcher.js';
 import { pool } from './assets.js';
+import { CFG } from './config.js';
 
 // Incremental "fresh copy". After a build we remember each page's validators (ETag / Last-Modified) and a short
 // content hash. When someone taps "Fresh copy", we ask the site whether anything changed (conditional requests,
 // no downloads of assets, no ZIP, no upload). If nothing changed the saved copy is simply sent again.
-const TTL = 24 * 60 * 60 * 1000;
+const TTL = CFG.staleMaxDays * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 150;
 export const hashOf = (html) => crypto.createHash('sha1').update(html).digest('hex').slice(0, 16);
 
@@ -14,6 +15,9 @@ export async function save(key, entries) {
   if (!entries?.length) return kv.del(`fp:${key}`);
   await kv.set(`fp:${key}`, JSON.stringify(entries.slice(0, MAX_ENTRIES)), TTL);
 }
+
+// is there anything to compare with? (checked before telling the user we are checking)
+export async function available(key) { return !!(await kv.get(`fp:${key}`)); }
 
 // 'unchanged' | 'changed' | null (no baseline to compare with)
 export async function probe(key, { budgetMs = 20000 } = {}) {

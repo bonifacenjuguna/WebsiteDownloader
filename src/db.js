@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { CFG } from './config.js';
+import { VISITOR_CODES } from './codes.js';
 
 let pool = null;
 let lastWarn = 0;
@@ -247,31 +248,45 @@ export async function setBanned(id, banned) {
   return !!r?.length;
 }
 
+// Median and 95th percentile instead of averages: one slow outlier no longer hides how a typical job goes.
+const PHASES = ['fetch', 'browser', 'map', 'crawl', 'assets', 'build', 'zip', 'upload'];
 export async function stats() {
   const main = await q(
     `SELECT (SELECT count(*) FROM users WHERE telegram_id <> 0) AS users,
             count(*) AS total,
             count(*) FILTER (WHERE status = 'ok') AS ok,
             count(*) FILTER (WHERE cached) AS cached,
-            count(*) FILTER (WHERE created_at > now() - interval '24 hours') AS last24h,
-            COALESCE(avg(duration_ms) FILTER (WHERE status = 'ok' AND NOT cached), 0)::int AS avg_ms
+            count(*) FILTER (WHERE created_at > now() - interval '24 hours') AS last24h
        FROM downloads`
   );
   if (!main) return null;
+  const week = await q(
+    `SELECT count(*) FILTER (WHERE status = 'ok') AS ok7,
+            count(*) FILTER (WHERE status = 'failed') AS failed7,
+            count(*) FILTER (WHERE status = 'failed' AND COALESCE(error_code, 'unknown') <> ALL($1::text[])) AS ours7,
+            percentile_cont(0.5)  WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE status = 'ok' AND NOT cached) AS p50,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE status = 'ok' AND NOT cached) AS p95
+       FROM downloads WHERE created_at > now() - interval '7 days'`,
+    [[...VISITOR_CODES]]
+  );
   const hosts = await q(`SELECT host, count(*) AS c FROM downloads WHERE created_at > now() - interval '7 days' GROUP BY host ORDER BY c DESC LIMIT 5`);
   const errors = await q(`SELECT COALESCE(error_code,'unknown') AS code, count(*) AS c FROM downloads WHERE status = 'failed' AND created_at > now() - interval '7 days' GROUP BY 1 ORDER BY c DESC LIMIT 5`);
-  const phases = await q(
-    `SELECT round(avg((timings->>'fetch')::numeric))::int   AS fetch,
-            round(avg((timings->>'browser')::numeric))::int AS browser,
-            round(avg((timings->>'assets')::numeric))::int  AS assets,
-            round(avg((timings->>'zip')::numeric))::int     AS zip,
-            round(avg((timings->>'upload')::numeric))::int  AS upload,
-            count(*) FILTER (WHERE mode LIKE '%browser%')    AS browser_jobs,
-            count(*)                                        AS jobs
+  const pc = (p, n) => `percentile_cont(${p}) WITHIN GROUP (ORDER BY (timings->>'${n}')::numeric) FILTER (WHERE timings ? '${n}')`;
+  const phaseRow = await q(
+    `SELECT ${PHASES.map((n) => `${pc(0.5, n)} AS ${n}_p50, ${pc(0.95, n)} AS ${n}_p95`).join(',\n            ')},
+            count(*) FILTER (WHERE mode LIKE '%browser%') AS browser_jobs,
+            count(*) AS jobs
        FROM downloads
       WHERE status = 'ok' AND NOT cached AND timings IS NOT NULL AND created_at > now() - interval '7 days'`
   );
-  return { ...main[0], hosts: hosts || [], errors: errors || [], phases: phases?.[0] || null };
+  const r = phaseRow?.[0];
+  const phases = r
+    ? { jobs: r.jobs, browser_jobs: r.browser_jobs, rows: PHASES.filter((n) => r[`${n}_p50`] != null).map((n) => ({ name: n, p50: Number(r[`${n}_p50`]), p95: Number(r[`${n}_p95`]) })) }
+    : null;
+  const w = week?.[0] || {};
+  return { ...main[0], ok7: Number(w.ok7 || 0), failed7: Number(w.failed7 || 0), ours7: Number(w.ours7 || 0),
+    p50: w.p50 == null ? null : Number(w.p50), p95: w.p95 == null ? null : Number(w.p95),
+    hosts: hosts || [], errors: errors || [], phases };
 }
 
 // Old rows are deleted after RETENTION_DAYS, or after the number of days a person chose in /privacy (0 = keep).

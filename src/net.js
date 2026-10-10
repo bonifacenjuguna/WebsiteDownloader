@@ -50,10 +50,32 @@ export async function assertPublicHost(hostname) {
 // then relaxes again while things go well, so the bot never hammers a small site and rarely gets blocked.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const gates = new Map(); // host -> { next, gap, seen }
+const slots = new Map(); // host -> { cap, inflight, waiters, ok }
 setInterval(() => {
   const old = Date.now() - 10 * 60 * 1000;
   for (const [h, g] of gates) if (g.seen < old) gates.delete(h);
+  for (const [h, s] of slots) if (!s.inflight && !s.waiters.length) slots.delete(h);
 }, 5 * 60 * 1000).unref();
+
+// Per-host concurrency: at most `cap` requests to one host at a time. The cap halves when the host pushes back
+// (429/503) and creeps back up while things go well, so a fast site is used fully and a fragile one is spared.
+const slotFor = (host) => {
+  let s = slots.get(host);
+  if (!s) { s = { cap: CFG.hostMaxConcurrent, inflight: 0, waiters: [], ok: 0 }; slots.set(host, s); }
+  return s;
+};
+export async function withHost(host, fn) {
+  const s = slotFor(host);
+  if (s.inflight >= s.cap) await new Promise((r) => s.waiters.push(r));
+  s.inflight++;
+  try { return await fn(); }
+  finally {
+    s.inflight--;
+    const next = s.waiters.shift();
+    if (next) next();
+  }
+}
+export const hostCapNow = (host) => slots.get(host)?.cap ?? CFG.hostMaxConcurrent;
 
 async function gate(host) {
   let g = gates.get(host);
@@ -71,9 +93,13 @@ function penalize(host, res) {
   let ms = Number(ra) * 1000;
   if (!Number.isFinite(ms) && ra) ms = new Date(ra).getTime() - Date.now();
   g.gap = Math.min(2000, Math.max(100, g.gap * 2));
+  const s = slots.get(host);
+  if (s) { s.cap = Math.max(2, Math.floor(s.cap / 2)); s.ok = 0; }
   g.next = Math.max(g.next, Date.now() + Math.min(Number.isFinite(ms) && ms > 0 ? ms : g.gap * 4, 10_000));
 }
 function relax(host) {
+  const s = slots.get(host);
+  if (s && ++s.ok % 20 === 0 && s.cap < CFG.hostMaxConcurrent) s.cap++;
   const g = gates.get(host);
   if (g && g.gap > CFG.hostGapMs) g.gap = Math.max(CFG.hostGapMs, Math.floor(g.gap * 0.9));
 }
@@ -106,7 +132,9 @@ export async function safeFetch(urlStr, { timeoutMs = CFG.fetchTimeoutMs, header
   throw new Error('Too many redirects');
 }
 
-export async function readBody(res, maxBytes) {
+// Reads a response body into memory. With `stallMs`, a transfer that goes quiet for that long is abandoned
+// (a slow file should not hold up the whole job); a steady slow download is still allowed to finish.
+export async function readBody(res, maxBytes, { stallMs = 0 } = {}) {
   const len = Number(res.headers.get('content-length') || 0);
   if (len > maxBytes) {
     res.body?.cancel().catch(() => {});
@@ -115,10 +143,31 @@ export async function readBody(res, maxBytes) {
   if (!res.body) return { buf: Buffer.alloc(0), size: 0 };
   const chunks = [];
   let size = 0;
-  for await (const chunk of res.body) {
-    size += chunk.length;
-    if (size > maxBytes) return { tooBig: true, size };
-    chunks.push(chunk);
+  if (!stallMs) {
+    for await (const chunk of res.body) {
+      size += chunk.length;
+      if (size > maxBytes) return { tooBig: true, size };
+      chunks.push(chunk);
+    }
+    return { buf: Buffer.concat(chunks), size };
+  }
+  const it = res.body[Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      let timer;
+      const stalled = new Promise((_, reject) => {
+        timer = setTimeout(() => { const e = new Error('download stalled'); e.name = 'TimeoutError'; reject(e); }, stallMs);
+      });
+      let r;
+      try { r = await Promise.race([it.next(), stalled]); } finally { clearTimeout(timer); }
+      if (r.done) break;
+      size += r.value.length;
+      if (size > maxBytes) { await it.return?.().catch(() => {}); return { tooBig: true, size }; }
+      chunks.push(r.value);
+    }
+  } catch (e) {
+    await it.return?.().catch(() => {});
+    throw e;
   }
   return { buf: Buffer.concat(chunks), size };
 }

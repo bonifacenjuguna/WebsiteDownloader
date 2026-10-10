@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.8.0 - Faster, lighter, no-gap deploys
+**Speed**
+- **Downloads are one pipeline.** A stylesheet is read the moment it arrives and the files it names (fonts, images, `@import`) join the queue immediately, instead of waiting for a whole "round" to finish. Concurrency is 24 files (`ASSET_CONCURRENCY`) and 8 pages (`PAGE_CONCURRENCY`).
+- **Adaptive per-host concurrency:** up to 8 requests at a time to one host (`HOST_MAX_CONCURRENT`); the cap halves when a host answers 429/503 and creeps back up while things go well. The politeness gap between requests is now 8 ms (`HOST_GAP_MS`, was 50).
+- **Slow files no longer hold a job:** a transfer that goes quiet for 10 s is abandoned (`ASSET_STALL_SEC`); a steady slow download still finishes.
+- **Shared asset cache:** pinned jQuery/Bootstrap/Font Awesome/CDN-library files and content-hashed Google Font files are downloaded once and reused by every later site (`SHARED_CACHE_MB`, 256 by default, least-recently-used eviction). Floating versions (`@latest`) are never cached.
+- **Stored, not recompressed:** images, video, fonts and archives go into the ZIP as they are (CPU saved).
+- **Stale-while-revalidate:** copies are sent as-is for 24 h (`CACHE_TTL_MIN`, was 6 h); copies up to 7 days old (`STALE_MAX_DAYS`) are re-checked with the site and re-sent when nothing changed, so many repeat requests no longer rebuild at all.
+
+**Memory**
+- **Chromium on demand:** it starts when a page needs it and closes after 5 idle minutes (`BROWSER_IDLE_MIN`); `BROWSER_WARM=true` restores always-on. A one-time check at startup still tells you if it cannot start. Browser concurrency default is 1.
+- **Resource-aware admission:** an extra parallel job waits while the container is above 92% memory (`MEM_ADMIT_RATIO`) or the temp disk has under 700 MB free (`DISK_MIN_MB`). The first job always runs.
+- **Housekeeping:** leftover job folders from a crash are removed at startup and hourly.
+
+**No-gap deploys and big files**
+- **Webhook mode** (`WEBHOOK_DOMAIN`): Telegram delivers updates to the service, pending updates are kept during a deploy, and the public address is verified before Telegram is told to use it (otherwise the bot falls back to polling and tells admins). On shutdown the bot stops taking calls, lets running jobs finish for `DRAIN_SECONDS`, and leaves the rest to resume.
+- **Self-hosted Telegram Bot API** (`TELEGRAM_API_URL`): lifts the 50 MB upload limit to 2 GB. Defaults adapt: 1.5 GB ZIP parts, 150 MB single files, 1.2 GB per site.
+- Resume bookkeeping fixed for jobs that finish during a shutdown drain.
+
+**Observability**
+- **`/stats`:** median and 95th-percentile times (build and each phase: fetch, browser, map, crawl, assets, build, zip, upload) instead of averages, plus a **real success rate** that ignores typos, private addresses, protected and region-blocked sites.
+- **`/ping`:** disk free, shared cache hits and size, updates mode (webhook/polling), jobs paused for resources, Chromium on demand.
+- **`GET /metrics`** (Prometheus text, enabled by `METRICS_TOKEN`): jobs by result and mode, a duration histogram, cache hits, queue, memory, disk, Chromium, shared cache.
+- **Structured logs:** one line per job; `LOG_FORMAT=json` for JSON lines.
+- Finer timings stored per job (`map`, `crawl`, `assets`, `build`), so you can see where time goes.
+
+**Tests:** 31 (asset pipeline with mocked servers, per-host cap, stall detection, queue admission, shared-cache rules, metrics, webhook/metrics HTTP routes, plus everything from before).
+
 ## 1.7.0 - A consistent look for every message
 One formatting vocabulary (`src/fmt.js`) now drives everything the bot says: **bold** = titles and the one thing to look at, `monospace` = values you might copy (ids, hosts, numbers), *italic* = hints, notes and footers, and 🟢🟡🔴 = health at a glance.
 

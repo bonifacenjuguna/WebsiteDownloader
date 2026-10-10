@@ -1,9 +1,14 @@
 export class JobQueue {
-  constructor(concurrency, maxWaiting) {
+  // canStart: admission check for starting an EXTRA parallel job (memory, disk). The first job always runs,
+  // so a busy machine slows down instead of stalling forever.
+  constructor(concurrency, maxWaiting, canStart = () => true) {
     this.concurrency = concurrency;
     this.maxWaiting = maxWaiting;
+    this.canStart = canStart;
     this.active = 0;
     this.waiting = [];
+    this.throttled = 0; // times a job had to wait for resources (for /stats and /metrics)
+    this.timer = null;
   }
   get load() { return this.active + this.waiting.length; }
   add(task) {
@@ -15,6 +20,11 @@ export class JobQueue {
   }
   #pump() {
     while (this.active < this.concurrency && this.waiting.length) {
+      if (this.active > 0 && !this.canStart()) {
+        this.throttled++;
+        this.timer ??= setTimeout(() => { this.timer = null; this.#pump(); }, 1500);
+        return;
+      }
       const j = this.waiting.shift();
       this.active++;
       j.task().then(j.resolve, j.reject).finally(() => { this.active--; this.#pump(); });

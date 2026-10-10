@@ -304,10 +304,12 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   const maxPages = spaSite ? CFG.siteMaxPagesBrowser : CFG.siteMaxPages;
 
   // ---- robots.txt and sitemap ----
+  const tm = Date.now();
   onStatus(S.mapping);
   const robotsText = (CFG.siteRespectRobots || CFG.siteSitemap) ? await fetchText(`${start.origin}/robots.txt`, 8000, 200_000, opts.signal) : '';
   const robots = CFG.siteRespectRobots ? parseRobots(robotsText) : [];
   const seeds = CFG.siteSitemap ? await readSitemaps(start, robotsText, scope, opts.signal) : [];
+  timings.map = Date.now() - tm;
   job.throwIfCancelled();
 
   // ---- one page of the crawl, with a per-page decision about the browser ----
@@ -351,6 +353,7 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   let accepted = 1;
   let loginSkipped = 0;
   let frontier = [startKey];
+  const tc = Date.now();
   const enqueue = (link, next) => {
     if (seen.has(link)) return;
     seen.add(link);
@@ -368,7 +371,7 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   for (let depth = 0; frontier.length && !job.expired(); depth++) {
     const next = [];
     if (depth === 0) for (const k of seeds) enqueue(k, next);
-    await pool(frontier, 4, async (key) => {
+    await pool(frontier, CFG.pageConcurrency, async (key) => {
       if (job.expired()) return;
       let page = pages.get(key);
       if (!page) {
@@ -397,11 +400,13 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     frontier = next;
   }
   job.throwIfCancelled();
+  timings.crawl = Date.now() - tc;
   const pageLimitHit = job.skipped.filter((s) => s.reason.startsWith('page limit')).length;
   const robotsBlocked = job.skipped.filter((s) => s.reason === 'blocked by robots.txt').length;
 
   // ---- every asset of every page, plus linked documents, downloaded once and shared ----
   for (const p of pages.values()) job.used.add(p.local.toLowerCase());
+  const ta = Date.now();
   onStatus(S.assets());
   let lastEmit = 0;
   job.onProgress = (done, total) => {
@@ -413,6 +418,8 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   await collectAssets(job, docs, start.href, [...fileLinks]);
   job.throwIfCancelled();
   await rewriteCssFiles(job);
+  timings.assets = Date.now() - ta;
+  const tb = Date.now();
 
   // ---- smart size budgeting: shrink images BEFORE leaving anything out ----
   const startPage = pages.get(startKey);
@@ -494,7 +501,7 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   if (pageLimitHit) warnings.push({ c: 'pageLimit', n: maxPages });
   if (robotsBlocked) warnings.push({ c: 'robots', n: robotsBlocked });
   if (job.timedOut) warnings.push({ c: 'slow' });
-  timings.assets = Date.now() - t;
+  timings.build = Date.now() - tb;
 
   // ---- pack into ZIP parts: all parts unzip into the same folder, and every link is relative to that folder ----
   t = Date.now();

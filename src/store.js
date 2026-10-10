@@ -99,6 +99,12 @@ export const closeStore = () => kv.close();
 
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
+const rowToResult = (row) => ({
+  urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
+  host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
+  at: new Date(row.created_at).getTime(),
+});
+
 export const cache = {
   // hot layer: Redis. durable layer: Postgres (survives a Redis flush)
   async getResult(key) {
@@ -106,14 +112,15 @@ export const cache = {
     if (hot) return hot;
     const row = await db.findFresh(key, CFG.cacheTtlMs / 1000);
     if (!row) return null;
-    const data = {
-      urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
-      host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
-      at: new Date(row.created_at).getTime(),
-    };
+    const data = rowToResult(row);
     const left = data.at + CFG.cacheTtlMs - Date.now();
     if (left > 0) await kv.set(`res:${key}`, JSON.stringify(data), left);
     return data;
+  },
+  // Older than the freshness window but still inside STALE_MAX_DAYS: not sent blindly, but worth re-checking with the site
+  async getStale(key) {
+    const row = await db.findFresh(key, CFG.staleMaxDays * 86400);
+    return row ? rowToResult(row) : null;
   },
   setResult: (key, data) => kv.set(`res:${key}`, JSON.stringify(data), CFG.cacheTtlMs),
   dropResult: (key) => kv.del(`res:${key}`),

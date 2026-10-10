@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 import { CFG, mb } from './config.js';
-import { safeFetch, readBody } from './net.js';
+import { safeFetch, readBody, withHost } from './net.js';
+import * as shared from './sharedcache.js';
 import { discover, cssRefs, rewriteCss } from './extract.js';
 import { UserError } from './errors.js';
 import { Semaphore } from './queue.js';
@@ -26,10 +27,19 @@ const TRANSIENT = /TimeoutError|AbortError|ECONNRESET|ETIMEDOUT|UND_ERR/;
 export async function fetchAsset(job, url) {
   if (job.attempted.has(url) || job.files.has(url)) return;
   job.attempted.add(url);
+  // popular library / font files come from the shared cache: no network at all
+  const hit = await shared.get(url);
+  if (hit) { await job.add(url, hit.buf, hit.type); return; }
+  let host;
+  try { host = new URL(url).host; } catch { job.failed.push({ url, reason: 'bad address' }); return; }
+  await withHost(host, () => download(job, url));
+}
+
+async function download(job, url) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (job.expired()) return;
     try {
-      const { res } = await safeFetch(url, { timeoutMs: job.limits.fetchTimeoutMs, headers: { referer: job.main.href, accept: '*/*' } });
+      const { res } = await safeFetch(url, { timeoutMs: job.limits.fetchTimeoutMs, signal: job.signal || undefined, headers: { referer: job.main.href, accept: '*/*' } });
       if (!res.ok) {
         res.body?.cancel().catch(() => {});
         if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
@@ -42,14 +52,14 @@ export async function fetchAsset(job, url) {
       }
       const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
       const declared = Number(res.headers.get('content-length') || 0);
-      const body = declared > BIG
-        ? await bigSem.run(() => readBody(res, job.limits.maxFileBytes))
-        : await readBody(res, job.limits.maxFileBytes);
+      const read = () => readBody(res, job.limits.maxFileBytes, { stallMs: CFG.stallMs });
+      const body = declared > BIG ? await bigSem.run(read) : await read();
       if (body.tooBig) {
         job.skipped.push({ url, reason: `larger than ${mb(job.limits.maxFileBytes)} MB`, size: body.size });
         return;
       }
       await job.add(url, body.buf, type);
+      if (job.files.has(url)) shared.put(url, body.buf, type); // fire and forget
       return;
     } catch (e) {
       const tag = `${e?.name} ${e?.code} ${e?.cause?.code}`;
@@ -60,15 +70,9 @@ export async function fetchAsset(job, url) {
   }
 }
 
-async function runPool(job, list) {
-  job.progress.total += list.length;
-  await pool(list, CFG.assetConcurrency, async (u) => {
-    await fetchAsset(job, u);
-    job.progress.done++;
-    job.onProgress?.(job.progress.done, job.progress.total);
-  });
-}
-
+// Downloads everything a set of pages needs as ONE pipeline: a stylesheet is read the moment it arrives and the
+// files it names (fonts, images, @import) join the queue straight away, instead of waiting for a "round" to finish.
+// Nested stylesheets are followed up to 3 levels deep.
 export async function collectAssets(job, htmlDocs, base, extraUrls = []) {
   const urls = new Set(extraUrls);
   for (const doc of htmlDocs) {
@@ -77,21 +81,49 @@ export async function collectAssets(job, htmlDocs, base, extraUrls = []) {
     const $ = cheerio.load(html);
     for (const u of discover($, docBase)) urls.add(u);
   }
-  await runPool(job, [...urls]);
 
-  // follow url() / @import inside CSS (up to 3 levels)
-  const done = new Set();
-  for (let round = 0; round < 3; round++) {
-    const css = [...job.files.values()].filter((f) => isCss(f) && !done.has(f.url));
-    if (!css.length) break;
-    const next = new Set();
-    for (const f of css) {
-      done.add(f.url);
-      const text = await fs.readFile(path.join(job.dir, f.local), 'utf8');
-      for (const u of cssRefs(text, f.url)) next.add(u);
+  const queue = [...urls];
+  const queued = new Set(urls);
+  const cssDepth = new Map();
+  job.progress.total += queue.length;
+  let inflight = 0;
+  const idle = [];
+  const wake = () => { while (idle.length) idle.shift()(); };
+
+  async function expandCss(rec) {
+    const depth = cssDepth.get(rec.url) ?? 0;
+    if (depth >= 3) return;
+    let text;
+    try { text = await fs.readFile(path.join(job.dir, rec.local), 'utf8'); } catch { return; }
+    const fresh = [];
+    for (const u of cssRefs(text, rec.url)) {
+      if (queued.has(u) || job.attempted.has(u)) continue;
+      queued.add(u);
+      cssDepth.set(u, depth + 1);
+      fresh.push(u);
     }
-    await runPool(job, [...next]);
+    if (fresh.length) { job.progress.total += fresh.length; queue.push(...fresh); }
   }
+
+  async function worker() {
+    for (;;) {
+      const u = queue.shift();
+      if (u === undefined) {
+        if (inflight === 0) { wake(); return; }
+        await new Promise((r) => idle.push(r));
+        continue;
+      }
+      inflight++;
+      try {
+        await fetchAsset(job, u);
+        const rec = job.files.get(u);
+        if (rec && isCss(rec)) await expandCss(rec);
+        job.progress.done++;
+        job.onProgress?.(job.progress.done, job.progress.total);
+      } finally { inflight--; wake(); }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, CFG.assetConcurrency) }, worker));
 }
 
 export async function rewriteCssFiles(job) {

@@ -82,7 +82,7 @@ const TOPICS = [
       [
         '<code>/history</code> shows your recent downloads. Tap one to get it again instantly. Tap <b>✖</b> next to one to remove it, or <b>🗑 Clear history</b> to remove them all.',
         '',
-        `Saved copies are kept for ${hours()}h. Ask for a site I already have and it arrives right away, marked <b>⚡ Instant copy</b>.`,
+        `Saved copies are kept for ${hours()}h. Ask for a site I already have and it arrives right away, marked <b>⚡ Instant copy</b>. After that, I quickly check the site and, if nothing changed, send the same copy again instead of rebuilding.`,
         '',
         'Want the latest version? Tap <b>🔄 Fresh copy</b> under the file. If nothing changed on the site, you get the same copy back at once.',
       ].join('\n'),

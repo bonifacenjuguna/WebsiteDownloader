@@ -1,6 +1,6 @@
 import { CFG } from './config.js';
 import { UserError, explainNetError } from './errors.js';
-import { safeFetch, readBody } from './net.js';
+import { safeFetch, readBody, withHost } from './net.js';
 import { decodeBody } from './extract.js';
 
 // First request for the address the user sent. Tries plain http when a bare domain does not answer on https.
@@ -36,6 +36,12 @@ export async function fetchMain(url, explicitScheme, signal) {
 // One HTML page of a crawl. Keeps the validators (ETag / Last-Modified) so a later "fresh copy" can ask
 // "has anything changed?" with conditional requests instead of rebuilding blindly.
 export async function fetchHtml(url, { etag, lastModified, signal } = {}) {
+  let host = '';
+  try { host = new URL(url).host; } catch { return { fail: 'bad address', status: 0 }; }
+  return withHost(host, () => fetchHtmlNow(url, { etag, lastModified, signal }));
+}
+
+async function fetchHtmlNow(url, { etag, lastModified, signal }) {
   try {
     const headers = { accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8' };
     if (etag) headers['if-none-match'] = etag;

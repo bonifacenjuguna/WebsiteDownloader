@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.7.0
+# Website Downloader (@WebsiteDownloaderBot) v1.8.0
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -22,7 +22,7 @@ Postgres and Redis are optional: without them the bot still works (in-memory cac
 ## Redis vs Postgres
 - **Redis (disposable):** result cache, failure cache, per-user lock and cooldown, daily counters, change fingerprints, jobs in flight (for resume).
 - **Postgres (durable):** users (language, auto-delete choice), download history, Telegram `file_id`s (so a Redis flush doesn't lose the cache), analytics, admin block list.
-- Cached results are shared between users: the bot never sends cookies or credentials, so everyone gets the same public copy. Default freshness is 6 hours (`CACHE_TTL_MIN`).
+- Cached results are shared between users: the bot never sends cookies or credentials, so everyone gets the same public copy. Default freshness is 24 hours (`CACHE_TTL_MIN`); older copies are re-checked and reused when the site did not change.
 - Privacy: requested URLs are stored with the user's Telegram ID for `RETENTION_DAYS` (default 90), or for the time the person chose in `/privacy`.
 
 ## How it works
@@ -62,6 +62,29 @@ Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unbl
 - `DOMAIN_DAILY_CAP` (new builds of one site per user per day) and `DOMAIN_GLOBAL_DAILY` (all users), `FAIL_STRIKES` / `FAIL_PAUSE_MIN` (a short pause after repeated failed attempts). Sites too big to send are remembered for 6 hours.
 - `BLOCKED_DOMAINS` and `/block` stop specific sites (subdomains included).
 - Set `ALLOWED_USERS` to restrict the bot to specific Telegram IDs.
+
+## Performance and memory (v1.8.0)
+- **Where the time goes:** `/stats` shows median and 95th-percentile times per phase (fetch, browser, map, crawl, assets, build, zip, upload) over 7 days. Tune what is slow.
+- **Downloads** run as one pipeline (stylesheets are expanded as they arrive), 24 files and 8 pages at a time, with an adaptive cap per host (`HOST_MAX_CONCURRENT`) and a stall timeout (`ASSET_STALL_SEC`).
+- **Shared asset cache** (`SHARED_CACHE_MB`): pinned CDN libraries and Google Font files are fetched once and reused by every site. Lives on the temp disk and is optional.
+- **Repeat requests:** copies are re-sent as-is for `CACHE_TTL_MIN` (24 h); older ones (up to `STALE_MAX_DAYS`) are re-checked with the site and re-sent if nothing changed.
+- **Memory:** Chromium starts on demand and closes after `BROWSER_IDLE_MIN` idle minutes. Extra parallel jobs wait while memory is above `MEM_ADMIT_RATIO` or free disk is under `DISK_MIN_MB`.
+- **Observability:** `/ping` (live health), `/stats`, `GET /metrics` (Prometheus text, set `METRICS_TOKEN`), and one structured log line per job (`LOG_FORMAT=json`).
+
+## Zero-downtime deploys (webhook mode)
+By default the bot long-polls, which leaves a short gap while a new version starts. To remove it:
+1. Give the bot service a public domain on Railway (Settings -> Networking -> Generate Domain) and make sure it listens on `$PORT` (it does).
+2. Set `WEBHOOK_DOMAIN=your-service.up.railway.app` (no `https://`) and redeploy.
+3. On start the bot checks that the address answers, then registers the webhook (secret path and secret token are derived from your bot token). If the address is unreachable it falls back to polling and tells admins.
+4. Pending updates are kept during a deploy, so nothing sent while the new version starts is lost. On shutdown the bot stops taking calls, lets running jobs finish for `DRAIN_SECONDS`, and leaves the rest to resume.
+To go back to polling, unset `WEBHOOK_DOMAIN`.
+
+## Bigger files: self-hosted Telegram Bot API (optional)
+Telegram's cloud API caps uploads at 50 MB. A self-hosted Bot API server raises that to 2 GB, so big sites arrive as one or a few ZIPs.
+1. Add a Railway service from the image `aiogram/telegram-bot-api` with `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` (from https://my.telegram.org). Keep it on the private network.
+2. **Once**, log the bot out of the cloud API: open `https://api.telegram.org/bot<TOKEN>/logOut` in a browser.
+3. Set `TELEGRAM_API_URL=http://<that-service>.railway.internal:8081` on the bot and redeploy.
+Defaults adapt automatically: 1.5 GB ZIP parts, 150 MB single files, 1.2 GB per site (override with `PART_MB`, `MAX_FILE_MB`, `SITE_MAX_TOTAL_MB`). Files are held in memory while downloading, so keep `MAX_FILE_MB` modest on small instances.
 
 ## Local run
 ```
