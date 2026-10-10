@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.0 - A consistent look for every message
+One formatting vocabulary (`src/fmt.js`) now drives everything the bot says: **bold** = titles and the one thing to look at, `monospace` = values you might copy (ids, hosts, numbers), *italic* = hints, notes and footers, and 🟢🟡🔴 = health at a glance.
+
+- **Result card:** `✅ **site**` / page title / `📄 12 pages · 🗂 80 files · 💾 5.0 MB` / at most one italic note. Several ZIPs: a summary first, then a bold *Part i of n* on each. The "instant copy" footer is italic.
+- **Progress:** the thing being worked on is bold, and the bar now shows a percentage (`▰▰▰▱▱▱▱▱▱▱  30%`). The queue message says what happens next.
+- **Errors:** every error is a bold one-line headline with the detail underneath, in every language (done by code, so translations match automatically). List screens (`/history`, clear-history and delete-data confirmations) get a bold title and an italic hint.
+- **`/ping`:** Pong with a latency dot, version and Node, uptime with the start time, a *Resources* section (memory with container share, Redis and Postgres latency with dots, Chromium, queue).
+- **`/stats`:** sections for health, *Activity*, *Where the time goes* (an aligned table), *Top sites* and *Top failures* (numbered / bulleted), instead of one long block of lines.
+- **Admin notices** (online, shutdown, error-rate and Chromium alerts), `/myid`, `/ban`, `/block` and friends follow the same style. Usage lines no longer show raw `<id>`.
+- **Safe by construction:** every message is sent as HTML, outside text (page titles, paths) is escaped, and if Telegram ever rejects a message's formatting the bot resends it as plain text instead of losing it (logged as `[format]`).
+- **Tests:** every message in every language is checked to be valid Telegram HTML (balanced tags, no stray `<`, `>` or `&`), including captions built from hostile page titles. 24 tests in total.
+
 ## 1.6.1 - Clean command menu, admin visibility
 - **Command menu fixed for good:** Telegram keeps command lists per scope and per language, so `/browser` could survive in a list registered earlier (by an old version or in @BotFather). On every start the bot now makes the menu match the code: sets the default list, deletes stale lists in every other scope and language, and sets each admin's own menu. The log line `Commands sync -> ...` shows what it did. Telegram apps cache menus, so close and reopen the chat once.
 - **Admins now know what the bot is doing:** a message when the bot comes online (version, time, Redis / Postgres / Chromium state, interrupted jobs being resumed) and one when it shuts down (deploys). Rapid restarts are rate-limited so a crash loop cannot spam. `ADMIN_NOTIFY=false` turns both off.

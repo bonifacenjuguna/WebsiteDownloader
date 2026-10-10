@@ -12,10 +12,10 @@ export default {
   ].join('\n'),
   previewLine: 'Prévia ao vivo da página como ela está agora.',
   STATUS: {
-    starting: (host) => `⏳ Salvando ${host}…`,
-    queued: (pos) => `⏳ Você é o nº ${pos} na fila…`,
+    starting: (host) => `⏳ Salvando <b>${host}</b>…`,
+    queued: (pos) => `⏳ Você é o nº <b>${pos}</b> na fila…`,
     shared: '⏳ Este site já está sendo salvo. Você o receberá em instantes.',
-    opening: (host) => `🌐 Abrindo ${host}…`,
+    opening: (host) => `🌐 Abrindo <b>${host}</b>…`,
     mapping: '🗺️ Explorando o site…',
     browser: '🧭 Carregando a página completa…',
     browser2: '🧭 Tentando outro caminho de acesso…',

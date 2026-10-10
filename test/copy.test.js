@@ -31,9 +31,10 @@ test('caption: one note at most, rendered in the reader language, old plain capt
   const r = { kind: 'pages', host: 'e.com', title: 'E', pages: 3, fileCount: 10, zipBytes: 2e6, skipped: 0, failed: 0, warnings: [{ c: 'pageLimit', n: 300 }, { c: 'signIn' }] };
   const stored = JSON.stringify(buildSummary(r, 1));
   const en = tr('en').caption(stored);
-  assert.match(en, /3 pages • 7 files/);
-  assert.equal(en.split('\n').filter((l) => /^[🔐📄🔒]/u.test(l)).length, 1);
+  assert.match(en, /3 pages  ·  🗂 7 files/);
+  assert.equal(en.split('\n').filter((l) => /^<i>/.test(l)).length, 1);
   assert.match(tr('es').caption(stored), /3 páginas/);
+  assert.match(en, /^✅ <b>e\.com<\/b>/);
   assert.equal(tr('en').caption('✅ old.com'), '✅ old.com');
 });
 

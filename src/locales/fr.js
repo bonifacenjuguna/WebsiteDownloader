@@ -12,10 +12,10 @@ export default {
   ].join('\n'),
   previewLine: 'Aperçu en direct de la page telle qu’elle est maintenant.',
   STATUS: {
-    starting: (host) => `⏳ Enregistrement de ${host}…`,
-    queued: (pos) => `⏳ Vous êtes n° ${pos} dans la file…`,
+    starting: (host) => `⏳ Enregistrement de <b>${host}</b>…`,
+    queued: (pos) => `⏳ Vous êtes n° <b>${pos}</b> dans la file…`,
     shared: '⏳ Ce site est déjà en cours d’enregistrement. Vous le recevrez dans un instant.',
-    opening: (host) => `🌐 Ouverture de ${host}…`,
+    opening: (host) => `🌐 Ouverture de <b>${host}</b>…`,
     mapping: '🗺️ Exploration du site…',
     browser: '🧭 Chargement de la page complète…',
     browser2: '🧭 Essai d’un autre accès…',

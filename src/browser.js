@@ -27,7 +27,7 @@ async function ensure() {
     browser = b;
     served = 0;
   })().catch((e) => {
-    notifyOnce('browser-launch', `⚠️ Chromium failed to start: ${e?.message || e}`);
+    notifyOnce('browser-launch', `⚠️ <b>Chromium failed to start</b>\n<code>${String(e?.message || e).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 300)}</code>`);
     throw e;
   }).finally(() => { launching = null; });
   await launching;

@@ -12,10 +12,10 @@ export default {
   ].join('\n'),
   previewLine: 'Muonekano wa moja kwa moja wa ukurasa kama ulivyo sasa.',
   STATUS: {
-    starting: (host) => `⏳ Ninahifadhi ${host}…`,
-    queued: (pos) => `⏳ Wewe ni wa ${pos} kwenye foleni…`,
+    starting: (host) => `⏳ Ninahifadhi <b>${host}</b>…`,
+    queued: (pos) => `⏳ Wewe ni wa <b>${pos}</b> kwenye foleni…`,
     shared: '⏳ Tovuti hii tayari inahifadhiwa. Utaipata muda mfupi ujao.',
-    opening: (host) => `🌐 Ninafungua ${host}…`,
+    opening: (host) => `🌐 Ninafungua <b>${host}</b>…`,
     mapping: '🗺️ Ninachunguza tovuti…',
     browser: '🧭 Ninapakia ukurasa kamili…',
     browser2: '🧭 Ninajaribu njia nyingine ya kuingia…',

@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.6.1
+# Website Downloader (@WebsiteDownloaderBot) v1.7.0
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -84,6 +84,9 @@ There is no admin screen. An admin is a Telegram user ID listed in the `ADMIN_ID
 - **When it does not fit:** images are recompressed first; then code and pages are packed first and the largest videos/images/documents are left out (listed in `skipped.txt`, still loading from the live site online).
 - **Folder listings:** an "Index of" page is detected automatically and downloaded as files (`SITE_MAX_FILES`, `SITE_MAX_DIRS`, `SITE_MAX_TOTAL_MB`), keeping the folder structure.
 - Time limit `SITE_TIMEOUT_SEC` (480). One link counts as one download toward `DAILY_LIMIT`.
+
+## Message style
+All messages are Telegram HTML built from one small vocabulary in `src/fmt.js` (bold titles, `monospace` values, italic hints, 🟢🟡🔴 health dots). Anything from outside is escaped with `esc()`. If Telegram rejects a message's formatting, it is resent as plain text. `npm test` validates every message in every language.
 
 ## Editing the wording
 Everything users read is in `src/copy.js` (English: start text, progress, captions, notes, errors, small messages, buttons), `src/locales/*.js` (translations; any missing key falls back to English), `src/help.js` (the /help guides, English) and `src/profile.js` (the bot's Telegram description). The backend keeps precise error codes and technical details in logs and the database, so you can reword freely. To add a language: create `src/locales/xx.js`, register it in `src/locales/index.js` and `LANGS` in `copy.js`; `npm test` checks the keys.

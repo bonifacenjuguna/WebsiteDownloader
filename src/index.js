@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Telegraf, Markup } from 'telegraf';
+import { Telegraf, Telegram, Markup } from 'telegraf';
 import { CFG } from './config.js';
 import { normalizeUrl, extractUrls, urlKey, sectionKey, bareHost } from './url.js';
 import { downloadWebsite } from './site.js';
@@ -23,6 +23,7 @@ import { startHealth } from './health.js';
 import { setNotifier, recordJob } from './alerts.js';
 import { syncCommands } from './commands.js';
 import { memoryShare, memoryMb } from './health-util.js';
+import { esc, b, i, code, dot, ms as fmtMs, uptime as fmtUptime, utc, table, stripTags } from './fmt.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -30,6 +31,26 @@ if (!CFG.token) {
   console.error('BOT_TOKEN is not set.');
   process.exit(1);
 }
+
+// Every message the bot sends is HTML (bold titles, monospace values, italic hints). A malformed tag makes Telegram
+// reject the WHOLE message, so on exactly that error the text is resent as plain text instead of being lost.
+// Patched on the class because Telegraf builds a fresh Telegram client per update.
+const HTML_METHODS = new Set(['sendMessage', 'editMessageText', 'sendDocument', 'sendPhoto', 'editMessageCaption']);
+const rawCallApi = Telegram.prototype.callApi;
+Telegram.prototype.callApi = async function callApi(method, payload = {}, ...rest) {
+  if (!HTML_METHODS.has(method)) return rawCallApi.call(this, method, payload, ...rest);
+  try {
+    return await rawCallApi.call(this, method, payload.parse_mode === undefined ? { ...payload, parse_mode: 'HTML' } : payload, ...rest);
+  } catch (e) {
+    if (!/can't parse entities/i.test(String(e?.description || e?.message))) throw e;
+    const plain = { ...payload };
+    delete plain.parse_mode;
+    if (typeof plain.text === 'string') plain.text = stripTags(plain.text);
+    if (typeof plain.caption === 'string') plain.caption = stripTags(plain.caption);
+    console.warn(`[format] ${method}: Telegram could not parse the HTML, sent as plain text`);
+    return rawCallApi.call(this, method, plain, ...rest);
+  }
+};
 
 const bot = new Telegraf(CFG.token, { handlerTimeout: 10 * 60 * 1000 });
 const queue = new JobQueue(CFG.queueConcurrency, CFG.queueMaxWaiting);
@@ -41,7 +62,6 @@ const startedAt = Date.now();
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
 const argOf = (ctx) => ctx.message.text.split(/\s+/)[1];
 const restOf = (ctx) => ctx.message.text.replace(/^\/\S+\s*/, '');
-const sec = (ms) => (ms == null ? '–' : `${(ms / 1000).toFixed(1)}s`);
 
 // ---------- language: the person's /language pick, else their Telegram app language ----------
 async function Lof(ctx) {
@@ -89,7 +109,7 @@ bot.help((ctx) => {
   return ctx.reply(view.text, helpExtra(view));
 });
 
-bot.command('myid', (ctx) => ctx.reply(`Your Telegram ID: ${ctx.from.id}${isAdmin(ctx) ? '\n✅ You are an admin.' : ''}`));
+bot.command('myid', (ctx) => ctx.reply(`🆔 ${b('Your Telegram ID')}\n${code(ctx.from.id)}${isAdmin(ctx) ? `\n\n✅ ${i('You are an admin.')}` : ''}`));
 
 // /download and the old /site both just take a link; every request saves the whole site now
 for (const cmd of ['download', 'site']) {
@@ -227,29 +247,34 @@ bot.action(/^lg:(auto|[a-z]{2})$/, async (ctx) => {
 // ---- admin ----
 bot.command('stats', async (ctx) => {
   if (!isAdmin(ctx)) return denyAdmin(ctx);
-  const s = db.enabled() ? await db.stats() : null;
-  const pct = (a, b) => (Number(b) ? `${Math.round((Number(a) / Number(b)) * 100)}%` : '–');
-  const b = browserStats();
+  const st = db.enabled() ? await db.stats() : null;
+  const pct = (x, y) => (Number(y) ? Math.round((Number(x) / Number(y)) * 100) : null);
+  const pctText = (v) => (v == null ? '–' : `${v}%`);
+  const br = browserStats();
   const lines = [
-    `📊 Website Downloader v${pkg.version}`,
-    `Redis: ${kvMode} • Postgres: ${db.enabled() ? 'on' : 'off'}`,
-    `Queue: ${queue.active} active, ${queue.waiting.length} waiting • Flights: ${flights.size}`,
-    `Browser: ${b.up ? 'up' : 'idle'} (${b.active} active, ${b.served} served, ${b.crashes} crashes)`,
+    `📊 ${b('Website Downloader')}  ${code(`v${pkg.version}`)}`,
+    `${kvMode === 'redis' ? '🟢' : '🟡'} Redis ${code(kvMode)}  ·  ${db.enabled() ? '🟢' : '🟡'} Postgres ${code(db.enabled() ? 'on' : 'off')}  ·  ${br.up ? '🟢' : '⚪'} Chromium ${code(br.up ? 'up' : 'idle')}`,
+    `🚦 Queue ${code(`${queue.active} active`)} ${code(`${queue.waiting.length} waiting`)} ${code(`${flights.size} in flight`)}`,
   ];
-  if (s) {
+  if (st) {
+    const success = pct(st.ok, st.total);
     lines.push(
-      `Users: ${s.users} • Downloads: ${s.total} (24h: ${s.last24h})`,
-      `Success: ${pct(s.ok, s.total)} • Cache hits: ${pct(s.cached, s.total)}`,
-      `Avg build time: ${(s.avg_ms / 1000).toFixed(1)}s`
+      '', b('Activity'),
+      `👥 Users  ${code(st.users)}`,
+      `📥 Downloads  ${code(st.total)}  ·  last 24h ${code(st.last24h)}`,
+      `${dot(success, 80, 60, true)} Success  ${code(pctText(success))}`,
+      `⚡ Cache hits  ${code(pctText(pct(st.cached, st.total)))}`,
+      `⏱ Average build  ${code(fmtMs(st.avg_ms))}`
     );
-    const p = s.phases;
-    if (p && Number(p.jobs) > 0)
-      lines.push('', `⏱ Avg phases, 7d (${p.jobs} builds, ${pct(p.browser_jobs, p.jobs)} used the browser):`,
-        `fetch ${sec(p.fetch)} • browser ${sec(p.browser)} • assets ${sec(p.assets)} • zip ${sec(p.zip)} • upload ${sec(p.upload)}`);
-    lines.push('', 'Top sites (7d):', ...s.hosts.map((h) => `• ${h.host} (${h.c})`),
-      '', 'Top failures (7d):', ...s.errors.map((e) => `• ${e.code} (${e.c})`));
+    const p = st.phases;
+    if (p && Number(p.jobs) > 0) {
+      lines.push('', `${b('Where the time goes')}  ${i(`7 days · ${p.jobs} builds · ${pctText(pct(p.browser_jobs, p.jobs))} used the browser`)}`,
+        table([['fetch', fmtMs(p.fetch)], ['browser', fmtMs(p.browser)], ['assets', fmtMs(p.assets)], ['zip', fmtMs(p.zip)], ['upload', fmtMs(p.upload)]]));
+    }
+    if (st.hosts.length) lines.push(b('Top sites') + `  ${i('7 days')}`, ...st.hosts.map((h, n) => `${n + 1}. ${esc(h.host)}  ·  ${code(h.c)}`), '');
+    if (st.errors.length) lines.push(b('Top failures') + `  ${i('7 days')}`, ...st.errors.map((e) => `• ${esc(e.code)}  ·  ${code(e.c)}`));
   }
-  await ctx.reply(lines.join('\n'));
+  await ctx.reply(lines.join('\n').trim());
 });
 
 for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
@@ -257,20 +282,15 @@ for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
     if (!isAdmin(ctx)) return denyAdmin(ctx);
     const L = await Lof(ctx);
     const id = Number(argOf(ctx));
-    if (!Number.isInteger(id)) return ctx.reply(`Usage: /${cmd} <telegram_id>`);
+    if (!Number.isInteger(id)) return ctx.reply(`${b('Usage')}  ${code(`/${cmd} <telegram_id>`)}`);
     if (flag && CFG.adminIds.includes(id)) return ctx.reply(L.MSG.adminSelf);
     const ok = await db.setBanned(id, flag);
-    await ctx.reply(ok ? `Done: ${id} ${flag ? 'banned' : 'unbanned'}.` : 'User not found (or Postgres is off).');
+    await ctx.reply(ok ? `${flag ? '🚫' : '✅'} ${code(id)} ${flag ? 'banned' : 'unbanned'}.` : `⚠️ ${i('User not found (or Postgres is off).')}`);
   });
 }
 
-const fmtUptime = (ms) => {
-  const s = Math.floor(ms / 1000);
-  const d = Math.floor(s / 86400); const h = Math.floor((s % 86400) / 3600); const m = Math.floor((s % 3600) / 60);
-  return `${d ? `${d}d ` : ''}${d || h ? `${h}h ` : ''}${m}m ${s % 60}s`;
-};
-const utc = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
-const timeIt = async (fn) => { const t = Date.now(); try { await fn(); return `${Date.now() - t} ms`; } catch { return 'error'; } };
+// null = the check failed
+const timeIt = async (fn) => { const t = Date.now(); try { await fn(); return Date.now() - t; } catch { return null; } };
 
 // Is it alive, how long has it been up, how fast are its parts? (admins only)
 bot.command('ping', async (ctx) => {
@@ -278,19 +298,23 @@ bot.command('ping', async (ctx) => {
   const t0 = Date.now();
   const m = await ctx.reply('🏓 …');
   const tg = Date.now() - t0; // a full round trip to Telegram
-  const [redis, pg] = await Promise.all([timeIt(() => kv.get('ping')), db.enabled() ? timeIt(() => db.ping()) : Promise.resolve('off')]);
-  const b = browserStats();
+  const [redis, pg] = await Promise.all([timeIt(() => kv.get('ping')), db.enabled() ? timeIt(() => db.ping()) : Promise.resolve(undefined)]);
+  const br = browserStats();
   const share = memoryShare();
-  const lines = [
-    `🏓 Pong • Telegram ${tg} ms`,
-    `🟢 v${pkg.version} • Node ${process.versions.node}`,
-    `⏱ Up ${fmtUptime(Date.now() - startedAt)} (since ${utc(startedAt)})`,
-    `💾 ${memoryMb()} MB${share == null ? '' : ` • container ${Math.round(share * 100)}%`}`,
-    `🗄 Redis (${kvMode}) ${redis} • Postgres ${pg}`,
-    `🧭 Chromium ${b.up ? 'up' : 'idle'} • ${b.active} active • ${b.served} served • ${b.crashes} crashes`,
-    `🚦 Queue ${queue.active} active, ${queue.waiting.length} waiting • ${flights.size} in flight`,
-  ];
-  await ctx.telegram.editMessageText(ctx.chat.id, m.message_id, undefined, lines.join('\n')).catch(() => ctx.reply(lines.join('\n')));
+  const lat = (v) => (v === undefined ? `${code('off')} 🟡` : v === null ? `${code('error')} 🔴` : `${code(fmtMs(v))} ${dot(v, 100, 500)}`);
+  const text = [
+    `🏓 ${b('Pong')}  ${code(fmtMs(tg))} ${dot(tg, 800, 2000)}`,
+    '',
+    `🟢 ${b(`v${pkg.version}`)}  ·  Node ${process.versions.node}`,
+    `⏱ Up ${code(fmtUptime(Date.now() - startedAt))}  ${i(`since ${utc(startedAt)}`)}`,
+    '',
+    b('Resources'),
+    `💾 Memory  ${code(`${memoryMb()} MB`)}${share == null ? '' : `  ·  container ${code(`${Math.round(share * 100)}%`)} ${dot(share * 100, 70, 85)}`}`,
+    `🗄 Redis ${kvMode === 'redis' ? lat(redis) : `${code('memory only')} 🟡`}  ·  Postgres ${lat(pg)}`,
+    `🧭 Chromium ${br.up ? '🟢 up' : '⚪ idle'}  ·  ${br.active} active  ·  ${br.served} served  ·  ${br.crashes} crashes`,
+    `🚦 Queue  ${queue.active} active  ·  ${queue.waiting.length} waiting  ·  ${flights.size} in flight`,
+  ].join('\n');
+  await ctx.telegram.editMessageText(ctx.chat.id, m.message_id, undefined, text).catch(() => ctx.reply(text));
 });
 
 bot.command('block', async (ctx) => {
@@ -298,18 +322,18 @@ bot.command('block', async (ctx) => {
   const arg = argOf(ctx);
   if (!arg) {
     const list = policy.blockedList();
-    return ctx.reply(list.length ? `🚫 Blocked domains (and their subdomains):\n${list.join('\n')}\n\nUsage: /block domain.com • /unblock domain.com` : 'No blocked domains.\nUsage: /block domain.com');
+    return ctx.reply(list.length ? `🚫 ${b('Blocked domains')}  ${i('subdomains included')}\n${list.map((d) => `• ${code(d)}`).join('\n')}\n\n${i('/block domain.com  ·  /unblock domain.com')}` : `🚫 ${b('No blocked domains')}\n${i('Usage: /block domain.com')}`);
   }
-  if (!policy.validDomain(arg)) return ctx.reply('Usage: /block domain.com');
+  if (!policy.validDomain(arg)) return ctx.reply(`${b('Usage')}  ${code('/block domain.com')}`);
   const d = await policy.addBlocked(arg, ctx.from.id);
-  await ctx.reply(`🚫 Blocked ${d} and its subdomains.`);
+  await ctx.reply(`🚫 ${code(d)} ${i('and its subdomains are now blocked.')}`);
 });
 bot.command('unblock', async (ctx) => {
   if (!isAdmin(ctx)) return denyAdmin(ctx);
   const arg = argOf(ctx);
-  if (!arg) return ctx.reply('Usage: /unblock domain.com');
+  if (!arg) return ctx.reply(`${b('Usage')}  ${code('/unblock domain.com')}`);
   const had = await policy.removeBlocked(arg);
-  await ctx.reply(had ? `✅ Unblocked ${arg}.` : `${arg} wasn't blocked.`);
+  await ctx.reply(had ? `✅ ${code(arg)} ${i('unblocked.')}` : `ℹ️ ${code(arg)} ${i("wasn't blocked.")}`);
 });
 
 // /help: topic buttons swap the message in place; ◀ ▶ page through; 🏠 menu; ✖ close
@@ -402,12 +426,12 @@ async function sendStored(ctx, data, label, L) {
     const ids = String(data.fileId).split(',').filter(Boolean);
     const main = L.caption(data.caption);
     // a result someone else just built looks like a normal fresh result: no "from cache" footer
-    const footer = label === 'shared' ? '' : `\n${L.CAP.footer(label, L.ago(Date.now() - data.at))}`;
-    if (ids.length > 1) await ctx.reply(`${main}${footer}\n\n${L.CAP.partsHint(ids.length)}`.slice(0, 4000));
-    for (let i = 0; i < ids.length; i++) {
-      const extra = { caption: ids.length > 1 ? L.CAP.part(i + 1, ids.length) : `${main}${footer}`.slice(0, 1000) };
-      if (i === ids.length - 1 && data.urlKey) Object.assign(extra, keyboard(L, data.urlKey, { refresh: label !== 'shared' }));
-      await ctx.replyWithDocument(ids[i], extra);
+    const footer = label === 'shared' ? '' : `\n\n${i(L.CAP.footer(label, L.ago(Date.now() - data.at)))}`;
+    if (ids.length > 1) await ctx.reply(`${main}${footer}\n\n${i(L.CAP.partsHint(ids.length))}`.slice(0, 4000));
+    for (let k = 0; k < ids.length; k++) {
+      const extra = { caption: ids.length > 1 ? b(L.CAP.part(k + 1, ids.length)) : `${main}${footer}`.slice(0, 1000) };
+      if (k === ids.length - 1 && data.urlKey) Object.assign(extra, keyboard(L, data.urlKey, { refresh: label !== 'shared' }));
+      await ctx.replyWithDocument(ids[k], extra);
     }
     return true;
   } catch (e) {
@@ -472,7 +496,7 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
   if (neg) {
     cache.rememberUrl(key, parsed.url.href);
     const retry = L.failureActions(neg.code).length > 0;
-    return ctx.reply(retry ? `${neg.message}\n\n${L.MSG.retrySoon}` : neg.message, failureMarkup(L, neg.code, key) ?? undefined);
+    return ctx.reply(retry ? `${neg.message}\n\n${i(L.MSG.retrySoon)}` : neg.message, failureMarkup(L, neg.code, key) ?? undefined);
   }
 
   let held = false;
@@ -605,17 +629,17 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
     if (signal.aborted) throw new UserError('cancelled', 'cancelled');
 
     // several ZIPs: the summary comes first, then every part is labelled "Part i of n"
-    if (n > 1) await ctx.reply(`${L.caption(caption)}\n\n${L.CAP.partsHint(n)}`.slice(0, 4000)).catch(() => {});
+    if (n > 1) await ctx.reply(`${L.caption(caption)}\n\n${i(L.CAP.partsHint(n))}`.slice(0, 4000)).catch(() => {});
     const tu = Date.now();
     const ids = [];
-    for (let i = 0; i < n; i++) {
-      update(L.STATUS.sending(i + 1, n));
+    for (let k = 0; k < n; k++) {
+      update(L.STATUS.sending(k + 1, n));
       ctx.sendChatAction('upload_document').catch(() => {});
       const msg = await ctx.replyWithDocument(
-        { source: parts[i].zipPath, filename: parts[i].zipName },
+        { source: parts[k].zipPath, filename: parts[k].zipName },
         {
-          caption: n > 1 ? L.CAP.part(i + 1, n) : L.caption(caption),
-          ...(i === n - 1 ? keyboard(L, key, { refresh: false }) : {}),
+          caption: n > 1 ? b(L.CAP.part(k + 1, n)) : L.caption(caption),
+          ...(k === n - 1 ? keyboard(L, key, { refresh: false }) : {}),
         }
       );
       ids.push(msg.document.file_id);
@@ -664,15 +688,18 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 async function announceStartup(warm, resumed) {
   if (!CFG.adminNotify || !CFG.adminIds.length) return;
   if (!(await kv.setNx('boot-notice', '1', 20_000))) return; // a crash loop must not spam admins
-  const chromium = CFG.enableBrowser ? ((await Promise.race([warm, sleepMs(25_000).then(() => 'slow')])) === true ? '✅' : '⚠️ not ready') : 'off';
+  const ready = CFG.enableBrowser ? (await Promise.race([warm, sleepMs(25_000).then(() => 'slow')])) === true : null;
   let username = '';
   try { username = ` @${(await bot.telegram.getMe()).username}`; } catch { /* still online */ }
+  const ok = (v) => (v ? '🟢' : '🟡');
   await notifyAdmins([
-    `🟢 Website Downloader v${pkg.version} is online${username}`,
-    `🕒 ${utc(Date.now())}`,
-    `🗄 Redis: ${kvMode === 'redis' ? '✅' : '⚠️ memory only'} • Postgres: ${db.enabled() ? '✅' : '⚠️ off'} • Chromium: ${chromium}`,
-    ...(resumed ? [`🔄 Resuming ${resumed} interrupted job${resumed === 1 ? '' : 's'}`] : []),
-    'Send /ping for live health.',
+    `🟢 ${b(`Website Downloader v${pkg.version}`)} is online${esc(username)}`,
+    i(utc(Date.now())),
+    '',
+    `${ok(kvMode === 'redis')} Redis  ·  ${ok(db.enabled())} Postgres  ·  ${ready === null ? '⚪ Chromium off' : `${ok(ready)} Chromium${ready ? '' : ' not ready'}`}`,
+    ...(resumed ? [`🔄 Resuming ${b(resumed)} interrupted job${resumed === 1 ? '' : 's'}`] : []),
+    '',
+    i('Send /ping for live health.'),
   ].join('\n'));
 }
 
@@ -730,7 +757,7 @@ async function shutdown(sig) {
   stopping = true;
   setTimeout(() => process.exit(0), 8000).unref();
   // tell admins before going quiet (deploys send SIGTERM); jobs in flight are picked up again by the next start
-  await Promise.race([notifyAdmins(`🔴 Website Downloader v${pkg.version} is shutting down (${sig}) after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`), sleepMs(3000)]);
+  await Promise.race([notifyAdmins(`🔴 ${b(`Website Downloader v${pkg.version} is shutting down`)}\n${i(`${sig} after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`)}`), sleepMs(3000)]);
   try { bot.stop(sig); } catch { /* not started */ }
   await Promise.allSettled([closeBrowser(), closeStore(), db.shutdown()]);
   process.exit(0);

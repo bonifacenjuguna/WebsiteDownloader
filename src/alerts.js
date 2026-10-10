@@ -33,5 +33,5 @@ export function recordJob(ok, code = '') {
   const tally = {};
   for (const b of bad) tally[b.code || 'unknown'] = (tally[b.code || 'unknown'] || 0) + 1;
   const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
-  notifyOnce('error-rate', `⚠️ ${bad.length} of the last ${counted.length} jobs failed. Most common: ${top[0]} (${top[1]}). Check /stats and the logs.`, 30 * 60 * 1000);
+  notifyOnce('error-rate', `⚠️ <b>${bad.length} of the last ${counted.length} jobs failed</b>\nMost common: <code>${top[0]}</code> (${top[1]})\n<i>Check /stats and the logs.</i>`, 30 * 60 * 1000);
 }

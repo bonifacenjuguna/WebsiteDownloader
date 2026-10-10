@@ -4,6 +4,7 @@
 // Use tr(lang) to get the wording for one language. Missing translations fall back to English, key by key.
 import { MB } from './config.js';
 import { UserError } from './errors.js';
+import { esc, b, i, code, titled, styleError } from './fmt.js';
 import { LOCALES } from './locales/index.js';
 
 const plural = (n, one, many = `${one}s`) => (n === 1 ? one : many);
@@ -20,7 +21,7 @@ const bar = (done, total, width = 10) => {
   const n = Math.max(0, Math.min(width, Math.round((done / Math.max(1, total)) * width)));
   return `${'▰'.repeat(n)}${'▱'.repeat(width - n)}`;
 };
-const withBar = (line, done, total) => (total ? `${line}\n${bar(done, total)}` : line);
+const withBar = (line, done, total) => (total ? `${line}\n<code>${bar(done, total)}</code>  ${Math.min(100, Math.round((done / Math.max(1, total)) * 100))}%` : line);
 
 // ---------------------------------------------------------------- English (the base language)
 const EN = {
@@ -37,20 +38,20 @@ const EN = {
 
   // ---- progress (one message, edited in place)
   STATUS: {
-    starting: (host) => `⏳ Saving ${host}…`,
-    queued: (pos) => `⏳ You're #${pos} in line…`,
+    starting: (host) => `⏳ Saving ${b(host)}…`,
+    queued: (pos) => `⏳ ${b(`You're #${pos} in line`)}\n${i('I will start as soon as a slot is free.')}`,
     shared: "⏳ This site is already being saved. You'll get it in a moment.",
-    opening: (host) => `🌐 Opening ${host}…`,
+    opening: (host) => `🌐 Opening ${b(host)}…`,
     mapping: '🗺️ Mapping the site…',
     browser: '🧭 Loading the full page…',
     browser2: '🧭 Trying another way in…',
-    assets: (done, total) => withBar(total ? `📦 Collecting files… ${done}/${total}` : '📦 Collecting files…', done, total),
+    assets: (done, total) => withBar(total ? `📦 ${b('Collecting files')}  ${done}/${total}` : `📦 ${b('Collecting files')}…`, done, total),
     checking: '🔎 Checking links…',
     zip: '🗜️ Packing your ZIP…',
     sending: (i = 1, n = 1) => (n > 1 ? `📤 Sending part ${i}/${n}…` : '📤 Sending…'),
     folders: (folders, files) => `📂 Looking through folders… (${folders} ${plural(folders, 'folder')}, ${files} ${plural(files, 'file')})`,
-    files: (done, total) => withBar(`📥 Downloading files… ${done}/${total}`, done, total),
-    pages: (done, total) => withBar(`📄 Saving pages… ${done}/${total}`, done, total),
+    files: (done, total) => withBar(`📥 ${b('Downloading files')}  ${done}/${total}`, done, total),
+    pages: (done, total) => withBar(`📄 ${b('Saving pages')}  ${done}/${total}`, done, total),
     preview: '🖼 Capturing a preview…',
     resuming: '🔄 I was restarted. Picking up where I left off…',
     cancelling: '🛑 Cancelling…',
@@ -94,7 +95,7 @@ const EN = {
     files: (n) => `${n} ${plural(n, 'file')}`,
     folders: (n) => `${n} ${plural(n, 'folder')}`,
     part: (i, n) => `📦 Part ${i} of ${n}`,
-    partsHint: (n) => `📦 Sent as ${n} ZIPs. Unzip them all into one folder, then open index.html.`,
+    partsHint: (n) => `📦 Sent as ${n} ZIPs. Unzip them all into one folder, then open ${code('index.html')}.`,
     justNow: 'just now',
     mAgo: (m) => `${m}m ago`,
     hAgo: (h) => `${h}h ago`,
@@ -141,15 +142,15 @@ const EN = {
     busy: "⏳ Your last download is still running. I'll send it as soon as it's ready.",
     cooldown: (s) => `⏳ Give me a moment. You can send the next link in ${s}s.`,
     daily: (n) => `📅 You've reached today's limit of ${n} new downloads. It resets at midnight UTC. Sites I've already saved and previews still work.`,
-    domainCap: (n, host) => `📅 You've saved ${host} ${n} times today. Try again tomorrow, or use the copy you already have in /history.`,
-    siteBusyToday: (host) => `📅 ${host} has been saved many times today already. Try again tomorrow.`,
+    domainCap: (n, host) => `📅 You've saved ${b(esc(host))} ${n} times today. Try again tomorrow, or use the copy you already have in /history.`,
+    siteBusyToday: (host) => `📅 ${b(esc(host))} has been saved many times today already. Try again tomorrow.`,
     paused: (min) => `⏸ Several attempts in a row didn't work out, so I'm pausing for about ${min} min. Please check the addresses and try again after that.`,
     retrySoon: '⏳ I just checked this one. Give it a few minutes, or tap Try again.',
     moreLinks: (n) => `🔗 I found ${n} links. I'm saving the first one. Send the others one at a time.`,
-    noLink: "I couldn't find a website address in that message. Send a link like example.com",
+    noLink: `I couldn't find a website address in that message. Send a link like ${code('example.com')}`,
     unchanged: "✅ Nothing has changed on this site since I saved it, so here's the same copy.",
     cancelNone: 'That job has already finished.',
-    restartLost: (host) => `⚠️ I was restarted while saving ${host} and couldn't finish. Please send the link again.`,
+    restartLost: (host) => `⚠️ I was restarted while saving ${b(esc(host))} and couldn't finish. Please send the link again.`,
     cancelOthers: "Others asked for this site too, so I'll finish it.",
     // history
     historyOff: "📜 History isn't available right now.",
@@ -163,16 +164,16 @@ const EN = {
     previewOff: "🖼 Previews aren't available right now.",
     previewWait: '⏳ One preview at a time. Try again in a few seconds.',
     previewFail: "🖼 I couldn't capture a preview of that page.",
-    usageDownload: 'Send /download followed by a link, for example:\n/download example.com',
-    usagePreview: 'Send /preview followed by a link, for example:\n/preview example.com',
+    usageDownload: `Send /download followed by a link, for example:\n${code('/download example.com')}`,
+    usagePreview: `Send /preview followed by a link, for example:\n${code('/preview example.com')}`,
     // privacy
     privacy: (retention) => [
       '🔒 <b>Privacy</b>',
       '',
       'I keep the addresses you ask for, linked to your Telegram ID, so you can find them in /history. I never ask for or store passwords or cookies.',
       '',
-      `Auto-delete: <b>${retention}</b>`,
-      'Choose how long your history is kept:',
+      `🕒 Auto-delete: <b>${retention}</b>`,
+      '<i>Choose how long your history is kept:</i>',
     ].join('\n'),
     retention: { def: (d) => `Default (${d} days)`, d7: '7 days', d30: '30 days', never: 'Never' },
     retentionSet: (label) => `✅ Auto-delete set to: ${label}.`,
@@ -205,6 +206,11 @@ export function tr(lang = 'en') {
     const f = loc.STATUS?.[k];
     if (f) L.STATUS[k] = (d, t) => withBar(f(d, t), d, t);
   }
+  // consistent look in every language: errors = bold first sentence + detail; list headers = bold title + italic hint
+  const styled = {};
+  for (const [k, v] of Object.entries(L.ERRORS)) styled[k] = styleError(v);
+  L.ERRORS = styled;
+  for (const k of ['historyTitle', 'historyAsk', 'deleteAsk']) L.MSG[k] = titled(L.MSG[k]);
   L.errorText = (c) => L.ERRORS[c] || L.ERRORS.internal;
   L.ago = (ms) => {
     const m = Math.floor(ms / 60000);
@@ -213,7 +219,7 @@ export function tr(lang = 'en') {
     const h = Math.floor(m / 60);
     return h < 48 ? L.CAP.hAgo(h) : L.CAP.dAgo(Math.floor(h / 24));
   };
-  L.previewCaption = (host) => `🖼 ${host}\n${loc.previewLine || 'Live preview of the page as it is right now.'}`;
+  L.previewCaption = (host) => `🖼 ${b(esc(host))}\n${i(loc.previewLine || 'Live preview of the page as it is right now.')}`;
   // buttons under a result: only what makes sense (a fresh copy only for a saved copy)
   L.actionsFor = ({ refresh = false } = {}) => [...(refresh ? [{ text: L.BTN.fresh, cb: 'r' }] : []), { text: L.BTN.preview, cb: 'p' }];
   L.failureActions = (code) => (RETRY_CODES.has(code) ? [{ text: L.BTN.retry, cb: 'r' }] : []);
@@ -245,16 +251,17 @@ export const parseSummary = (stored) => {
 export function renderCaption(L, stored) {
   const s = parseSummary(stored);
   if (!s) return String(stored || ''); // captions saved by older versions are plain text
-  const lines = [`✅ ${s.host}`];
+  const dot = '  ·  ';
+  const lines = [`✅ ${b(esc(s.host))}`];
   if (s.kind === 'listing') {
-    lines.push(`📂 ${s.title}`, '', `📦 ${L.CAP.files(s.files)} • ${L.CAP.folders(s.dirs)} • ${size(s.bytes)}`);
+    lines.push(`📂 ${code(s.title)}`, '', `📄 ${L.CAP.files(s.files)}${dot}🗂 ${L.CAP.folders(s.dirs)}${dot}💾 ${size(s.bytes)}`);
   } else {
-    if (s.title) lines.push(`📝 ${s.title}`);
+    if (s.title) lines.push(esc(s.title));
     const assets = Math.max(0, s.files - s.pages);
-    lines.push('', `📦 ${L.CAP.pages(s.pages)} • ${L.CAP.files(assets)} • ${size(s.bytes)}`);
+    lines.push('', `📄 ${L.CAP.pages(s.pages)}${dot}🗂 ${L.CAP.files(assets)}${dot}💾 ${size(s.bytes)}`);
   }
   const note = NOTE_ORDER.map((c) => s.notes.find((n) => n.c === c)).find(Boolean);
-  if (note && L.NOTE[note.c]) lines.push('', L.NOTE[note.c](note.n));
+  if (note && L.NOTE[note.c]) lines.push('', i(L.NOTE[note.c](note.n)));
   return lines.join('\n').slice(0, 900);
 }
 
