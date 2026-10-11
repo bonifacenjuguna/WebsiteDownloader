@@ -89,6 +89,7 @@ export const CFG = {
   archive: process.env.ARCHIVE !== 'false',
   liveRetentionMs: num('LIVE_RETENTION_HOURS', 168) * 60 * 60 * 1000,   // how long an item stays in Live before it moves to the Vault
   archiveRatePerMin: num('ARCHIVE_RATE_PER_MIN', 15),                    // posts per minute into one channel (Telegram allows about 20)
+  archiveMinGapMs: numZ('ARCHIVE_MIN_GAP_MS', 1100),                     // least time between two posts into one chat (Telegram asks for about 1 s)
   liveChatId: chatId('LIVE_CHANNEL_ID'),
   vaultChatId: chatId('VAULT_CHANNEL_ID'),
   opsChatId: chatId('OPS_CHAT_ID'),

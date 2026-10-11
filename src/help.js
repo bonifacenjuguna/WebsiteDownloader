@@ -160,6 +160,7 @@ const TOPICS = [
         '🗄 <b>Vault</b> (channel): cold storage. Copied here before Live is cleared, never removed.',
         '🛠 <b>Ops</b> (group with Topics): alerts, errors, deploys, a daily digest, logs and admin actions, one topic each.',
         '',
+        '• <code>/archive setup</code>: connect a space with Telegram\'s own picker',
         '• <code>/archive</code>: status and connected spaces',
         '• <code>/archive test</code>: checks everything end to end',
         '• <code>/archive example.com</code>: find a site, with links',

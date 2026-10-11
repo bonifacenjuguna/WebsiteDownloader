@@ -85,6 +85,7 @@ export const VARS = [
   ['archive', 'OPS_CHAT_ID', '', 'Optional: chat id of the Ops forum group (Topics turned on). Blank = assign it with the buttons.'],
   ['archive', 'LIVE_RETENTION_HOURS', '168', 'How long an item stays in Live before it is copied to the Vault and cleared (168 = 7 days).'],
   ['archive', 'ARCHIVE_RATE_PER_MIN', '15', 'Posts per minute into one channel. Telegram allows about 20.'],
+  ['archive', 'ARCHIVE_MIN_GAP_MS', '1100', 'Least time in milliseconds between two posts into the same chat (Telegram asks bots to stay near one message per second).'],
   ['archive', 'RESCUE', 'true', 'When a site is down, blocked or gone, offer the last archived copy.'],
   ['archive', 'OPS_DIGEST', 'true', 'Post one daily summary to the Ops group.'],
   ['archive', 'DIGEST_HOUR_UTC', '6', 'Hour of day (UTC, 0-23) after which the daily digest is posted.'],

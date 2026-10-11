@@ -85,9 +85,10 @@ const archiveStore = new Proxy({ impl: new MemoryStore() }, {
   set: (t, k, v) => { t[k] = v; return true; },
 });
 let botIdValue = 0;
+let botUsername = '';
 const archive = createArchive({
   store: archiveStore,
-  api: makeApi((method, payload) => bot.telegram.callApi(method, payload), new RateLimiter({ perMinute: CFG.archiveRatePerMin })),
+  api: makeApi((method, payload) => bot.telegram.callApi(method, payload), new RateLimiter({ perMinute: CFG.archiveRatePerMin, minGapMs: CFG.archiveMinGapMs })),
   cfg: {
     enabled: CFG.archive, retentionMs: CFG.liveRetentionMs, digestEnabled: CFG.digestEnabled, digestHour: CFG.digestHour,
     env: { live: CFG.liveChatId, vault: CFG.vaultChatId, ops: CFG.opsChatId },
@@ -455,6 +456,73 @@ bot.action(/^x:([a-f0-9]{40})$/, async (ctx) => {
 });
 
 // ---------- connecting the Live / Vault / Ops spaces ----------
+// THE way: Telegram's own chat picker. A keyboard button opens Telegram's native list of channels/groups you administer
+// (private ones only), and the chosen chat comes straight back to the bot, no ids to copy. If the bot is not in the chat yet,
+// Telegram adds it as admin with exactly the rights asked for below. Works for chats where the bot was added long ago too.
+const SPACE_REQUEST = { live: 1, vault: 2, ops: 3 };
+const ROLE_OF_REQUEST = { 1: 'live', 2: 'vault', 3: 'ops' };
+const SPACE_RIGHTS = {
+  live: { can_post_messages: true, can_edit_messages: true, can_delete_messages: true },
+  vault: { can_post_messages: true },
+  ops: { can_manage_topics: true },
+};
+function requestChatButton(role) {
+  const base = { request_id: SPACE_REQUEST[role], chat_has_username: false, request_title: true, user_administrator_rights: SPACE_RIGHTS[role], bot_administrator_rights: SPACE_RIGHTS[role] };
+  return {
+    text: `${ROLE_INFO[role].icon} Choose the ${ROLE_INFO[role].name} ${role === 'ops' ? 'group' : 'channel'}`,
+    request_chat: role === 'ops' ? { ...base, chat_is_channel: false, chat_is_forum: true } : { ...base, chat_is_channel: true },
+  };
+}
+// one button per space that is not connected yet; nothing left = the keyboard is removed
+const pickerKeyboard = (roles) => (roles.length
+  ? { reply_markup: { keyboard: roles.map((r) => [requestChatButton(r)]), resize_keyboard: true, one_time_keyboard: true } }
+  : { reply_markup: { remove_keyboard: true } });
+async function missingRoles() { const s = await archive.describe(); return ROLES.filter((r) => !s[r]); }
+
+// the same thing as plain links: Telegram opens "add to channel/group" with the rights already ticked
+function addLinks() {
+  if (!botUsername) return '';
+  const link = (kind, rights) => `https://t.me/${botUsername}?${kind}&admin=${rights.join('+')}`;
+  const a = (url, text) => `<a href="${esc(url)}">${text}</a>`;
+  return `${a(link('startchannel', ['post_messages', 'edit_messages', 'delete_messages']), 'Add me to a channel as admin')}  ·  ${a(link('startgroup', ['manage_topics']), 'Add me to the Ops group')}`;
+}
+
+async function setupView() {
+  const spaces = await archive.describe();
+  const missing = ROLES.filter((r) => !spaces[r]);
+  const lines = [
+    `🔌 ${b('Connect your spaces')}`,
+    ...ROLES.map((r) => `${ROLE_INFO[r].icon} ${b(ROLE_INFO[r].name)}  ${spaces[r] ? `🟢 ${esc(spaces[r].title)}` : '⚪ not connected'}`),
+    '',
+    ...(missing.length
+      ? [
+        `Tap a button below. Telegram opens its own picker: choose the ${missing.length === 1 ? 'chat' : 'chats'} and I join as admin with exactly the rights I need.`,
+        i('Create the channels first (private), and for Ops turn on Topics in the group settings.'),
+        ...(addLinks() ? ['', `${i('Or add me directly:')}  ${addLinks()}`] : []),
+      ]
+      : [`✅ ${b('Everything is connected.')}`, i('Send /archive test to check it end to end.')]),
+  ];
+  return { text: lines.join('\n'), extra: pickerKeyboard(missing) };
+}
+
+// the admin picked a chat in the native picker
+bot.on('message', async (ctx, next) => {
+  const shared = ctx.message?.chat_shared;
+  if (!shared) return next();
+  if (!isAdmin(ctx)) return undefined;
+  const role = ROLE_OF_REQUEST[shared.request_id];
+  if (!role) return undefined;
+  const r = await archive.assign(role, shared.chat_id);
+  const missing = await missingRoles();
+  if (!r.ok) {
+    return ctx.reply(`⚠️ ${b(`Not yet: ${ROLE_INFO[role].name}`)}\n${r.problems.map((p) => `• ${esc(p)}`).join('\n')}\n\n${i('Fix this, then pick it again.')}`, pickerKeyboard(missing.includes(role) ? missing : [...missing, role]));
+  }
+  const topics = r.topics?.created?.length ? `\n${i(`Created ${r.topics.created.length} topic${r.topics.created.length === 1 ? '' : 's'}.`)}` : '';
+  archive.ops.post('admin', `🛡 ${b('Space connected')}  ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)}\n${esc(r.title || shared.title || shared.chat_id)}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
+  return ctx.reply(`✅ ${b(esc(r.title || shared.title || String(shared.chat_id)))} is now ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)}\n${i(ROLE_INFO[role].what)}${topics}\n\n${missing.length ? i(`Still to connect: ${missing.map((m) => ROLE_INFO[m].name).join(', ')}.`) : `🎉 ${b('All three spaces are connected.')}  ${i('Send /archive test to check it end to end.')}`}`, pickerKeyboard(missing));
+});
+
+
 // Add the bot as admin to a channel or group and it messages every admin with buttons: what is this chat for?
 async function offerSpace(chatId) {
   if (!CFG.adminIds.length) { console.log('[archive] added to a chat, but ADMIN_IDS is not set so nobody can be asked what it is for'); return; }
@@ -473,6 +541,7 @@ async function offerSpace(chatId) {
     }),
     '',
     i('Choose what this chat is for. ⚠️ means something is still missing: fix it, then tap again.'),
+    i('Tip: /archive setup opens Telegram\'s own picker, no waiting for this message.'),
   ];
   const kb = Markup.inlineKeyboard([
     ...ROLES.map((r) => [Markup.button.callback(`${info?.fits[r]?.length ? '⚠️' : ROLE_INFO[r].icon} ${ROLE_INFO[r].name}`, `sp:${r}:${chatId}`)]),
@@ -528,8 +597,8 @@ async function archiveStatus() {
     ...(snap.problems ? [`⚠️ ${b(snap.problems)} need attention  ${i('/archive retry')}`] : []),
     `⏳ Items stay in Live for ${mono(`${Math.round(CFG.liveRetentionMs / 3600000)} h`)}  ·  Rescue ${mono(CFG.rescue ? 'on' : 'off')}`,
     '',
-    i('/archive test  ·  /archive retry  ·  /archive expire  ·  /archive example.com'),
-    ...(ROLES.some((r) => !spaces[r]) ? ['', i('To connect a space: add me as admin to a private channel (Live, Vault) or a group with Topics (Ops). I will ask what it is for.')] : []),
+    i('/archive setup  ·  /archive test  ·  /archive retry  ·  /archive expire  ·  /archive example.com'),
+    ...(ROLES.some((r) => !spaces[r]) ? ['', `👆 ${i('Tap a button below to connect what is missing, or send /archive setup.')}`] : []),
   ].join('\n');
 }
 
@@ -537,7 +606,10 @@ bot.command('archive', async (ctx) => {
   if (!isAdmin(ctx)) return denyAdmin(ctx);
   const [, sub, ...rest] = ctx.message.text.trim().split(/\s+/);
   const arg = rest.join(' ');
-  if (!sub) return ctx.reply(await archiveStatus());
+  if (!sub) {
+    const missing = ctx.chat.type === 'private' ? await missingRoles() : [];
+    return ctx.reply(await archiveStatus(), missing.length ? pickerKeyboard(missing) : undefined);
+  }
   switch (sub.toLowerCase()) {
     case 'test': {
       const note = await ctx.reply(`🧪 ${b('Testing the archive…')}  ${i('database, channels, copy and delete, topics')}`);
@@ -549,6 +621,11 @@ bot.command('archive', async (ctx) => {
         ...steps.map((s) => `${s.ok ? '✅' : '❌'} ${esc(s.name)}${s.detail ? `\n    ${i(esc(s.detail))}` : ''}`),
       ].join('\n');
       return ctx.telegram.editMessageText(ctx.chat.id, note.message_id, undefined, text).catch(() => ctx.reply(text));
+    }
+    case 'setup':
+    case 'connect': {
+      const v = await setupView();
+      return ctx.reply(v.text, v.extra);
     }
     case 'retry': {
       const n = await archive.retryFailed();
@@ -563,7 +640,7 @@ bot.command('archive', async (ctx) => {
       if (!ROLES.includes(role)) return ctx.reply(`${b('Usage')}  ${mono('/archive unset live|vault|ops')}`);
       await archive.spaces.unset(role);
       archive.ops.post('admin', `🛡 ${b('Space disconnected')}  ${ROLE_INFO[role].icon} ${ROLE_INFO[role].name}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
-      return ctx.reply(`➖ ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)} ${i('disconnected. Nothing was deleted from the chat.')}`);
+      return ctx.reply(`➖ ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)} ${i('disconnected. Nothing was deleted from the chat.')}`, pickerKeyboard(await missingRoles()));
     }
     default: {
       const found = await archive.search([sub, ...rest].join(' ').replace(/^https?:\/\//, '').split('/')[0], 6).catch(() => []);
@@ -926,6 +1003,7 @@ async function announceStartup(warm, resumed, webhookFellBack) {
   let username = '';
   try { username = ` @${(await bot.telegram.getMe()).username}`; } catch { /* still online */ }
   const ok = (v) => (v ? '🟢' : '🟡');
+  const missingNow = await missingRoles().catch(() => []);
   const chromium = ready === null ? '⚪ Chromium off' : `${ok(ready)} Chromium${ready ? (CFG.browserWarm ? '' : ' (on demand)') : ' not ready'}`;
   const text = ([
     `🟢 ${b(`Website Downloader v${pkg.version}`)} is online${esc(username)}`,
@@ -933,6 +1011,7 @@ async function announceStartup(warm, resumed, webhookFellBack) {
     '',
     `${ok(kvMode === 'redis')} Redis  ·  ${ok(db.enabled())} Postgres  ·  ${chromium}`,
     `📡 Updates by ${b(mode)}${CFG.telegramApiRoot ? '  ·  🗄 local Bot API (2 GB files)' : ''}`,
+    ...(missingNow.length ? [`📦 ${b('Archive not connected yet')}  ${i(`missing: ${missingNow.map((r) => ROLE_INFO[r].name).join(', ')}. Send /archive setup.`)}`] : []),
     ...(webhookFellBack ? [`⚠️ ${i('WEBHOOK_DOMAIN is set but the public address did not answer, so I am using polling. Check the domain and PORT.')}`] : []),
     ...(resumed ? [`🔄 Resuming ${b(resumed)} interrupted job${resumed === 1 ? '' : 's'}`] : []),
     '',
@@ -975,6 +1054,7 @@ async function main() {
   const me = await bot.telegram.getMe(); // also proves the token works
   bot.botInfo = me;
   botIdValue = me.id;
+  botUsername = me.username || '';
   let hook = null;
   if (CFG.webhookDomain && CFG.healthEnabled && CFG.healthPort) {
     const id = crypto.createHash('sha256').update(CFG.token).digest('hex');

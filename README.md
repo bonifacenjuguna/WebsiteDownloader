@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.9.0
+# Website Downloader (@WebsiteDownloaderBot) v1.9.1
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -150,6 +150,7 @@ Three private spaces: Live (current items), Vault (cold storage) and Ops (alerts
 | `OPS_CHAT_ID` | *(blank)* | Optional: chat id of the Ops forum group (Topics turned on). Blank = assign it with the buttons. |
 | `LIVE_RETENTION_HOURS` | `168` | How long an item stays in Live before it is copied to the Vault and cleared (168 = 7 days). |
 | `ARCHIVE_RATE_PER_MIN` | `15` | Posts per minute into one channel. Telegram allows about 20. |
+| `ARCHIVE_MIN_GAP_MS` | `1100` | Least time in milliseconds between two posts into the same chat (Telegram asks bots to stay near one message per second). |
 | `RESCUE` | `true` | When a site is down, blocked or gone, offer the last archived copy. |
 | `OPS_DIGEST` | `true` | Post one daily summary to the Ops group. |
 | `DIGEST_HOUR_UTC` | `6` | Hour of day (UTC, 0-23) after which the daily digest is posted. |
@@ -242,9 +243,13 @@ site down / blocked / gone ──▶ "📦 Saved copy · Oct 3" button ──▶
 
 **Set up (about five minutes)**
 1. Create two **private channels** (Live, Vault) and one **private group** (Ops). In the Ops group turn on **Topics** (Edit -> Topics; choose the **List** layout, it shows each topic's latest message).
-2. Add the bot as **admin** to each: Live needs *post, edit and delete messages*; Vault needs *post messages*; Ops needs *manage topics*. Give it nothing else.
-3. The bot messages every admin (`ADMIN_IDS`) with buttons: **Live / Vault / Ops**. Tap the right one per chat. It checks rights and kind, says exactly what is missing, and connects the space (Ops gets its six topics automatically).
-4. Send `/archive test`: it writes to the database, posts to and deletes from each channel, copies Live -> Vault, creates the topics and posts to Ops, then reports each step. All green means it works in your setup.
+2. Send **`/archive setup`** to the bot. Under the message you get one button per space; tap one and **Telegram's own picker** opens, listing only the private channels or groups you administer (Ops shows only groups with Topics on). Choose the chat and it is connected on the spot. No ids to copy.
+   - If the bot is not in that chat yet, Telegram adds it as admin with exactly the rights it needs: Live *post, edit and delete messages*; Vault *post messages*; Ops *manage topics*. Nothing else is requested.
+   - **Already added the bot earlier?** Same buttons: pick the chat and it is connected. (It does not matter that the bot was added before this version ran.)
+   - The message also has two **add-me links** that open Telegram's "add as admin" screen with those rights ticked.
+   - Adding the bot to a chat by hand still works: it DMs the admins Live / Vault / Ops buttons.
+3. The bot checks the chat kind and its own rights and says exactly what is missing; the keyboard shrinks as spaces get connected, and Ops gets its six topics automatically.
+4. Send `/archive test`: it writes to the database, posts to and deletes from each channel, copies Live -> Vault, creates the topics and posts to Ops, then reports each step. All green means it works in your setup. If a space is missing it says so and points you to `/archive setup`; the online message at startup does the same.
 Prefer variables? `LIVE_CHANNEL_ID`, `VAULT_CHANNEL_ID`, `OPS_CHAT_ID` override the buttons.
 
 **What a Live post looks like**
@@ -278,7 +283,7 @@ With a preview picture the picture carries this label and the ZIP is a reply to 
 | 🛡 Admin actions | bans, blocks, space changes | quiet |
 A topic deleted by hand is created again on the next post.
 
-**Commands (admins):** `/archive` (status), `/archive test`, `/archive example.com` (find, with links), `/archive retry`, `/archive expire`, `/archive unset live|vault|ops`.
+**Commands (admins):** `/archive` (status), `/archive setup` (connect spaces with Telegram's picker), `/archive test`, `/archive example.com` (find, with links), `/archive retry`, `/archive expire`, `/archive unset live|vault|ops`.
 
 **Risks to know about:** Telegram may remove channels that host copied sites, so the Vault is separate from Live and Ops; the bot cannot read channel history, it only knows the links it stored; and because posts stay in the Vault, copyright and takedown requests are yours to handle.
 

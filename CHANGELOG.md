@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.1 - Connect spaces the native Telegram way
+- **Telegram's own chat picker.** `/archive setup` (also shown under `/archive` when something is missing) gives one button per space. Tapping it opens Telegram's native list of the private channels or groups you administer (Ops: groups with Topics on); the chosen chat comes straight back to the bot. No ids, and it works for chats where the bot was added long ago, which the old "I was just added" message could not (that message only appears at the moment the bot becomes admin, so it was missed if the bot was added before this version ran).
+- If the bot is not in the chosen chat, Telegram adds it as admin with exactly the rights needed (Live: post, edit, delete; Vault: post; Ops: manage topics). Two **add-me links** do the same with the rights pre-ticked.
+- The keyboard shrinks as spaces are connected and is removed when all three are. A chat missing a right, an unknown chat, a non-admin and unrelated messages are all handled (the last pass straight through to the other handlers).
+- **No more guessing:** the startup message says when spaces are not connected and points to `/archive setup`; `/archive test` says "not connected: send /archive setup" instead of "not set"; `/archive unset` brings the picker back.
+- New setting `ARCHIVE_MIN_GAP_MS` (1100): least time between two posts into one chat.
+- `npm run test:bot` now has 18 end-to-end checks (the picker keyboard options, connecting one by one, rights problems, non-admins, pass-through, the startup hint).
+
 ## 1.9.0 - The archive: Live, Vault and Ops
 Three private spaces, set up by adding the bot as admin and tapping a button.
 - **Live (channel):** every successful build is posted in the background by reusing the same Telegram file (no second upload), with a searchable label (`#example_com #2026_10 #id_a3f9c2`), a preview picture when one already exists, and the expiry date. Several ZIPs become *Part i of n* replies.

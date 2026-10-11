@@ -22,6 +22,7 @@ async function run() {
   Object.assign(process.env, {
     BOT_TOKEN: '123:test', ADMIN_IDS: '999', PROFILE_SYNC: 'false', ENABLE_BROWSER: 'false', HEALTH: 'false',
     COOLDOWN_SEC: '1', DAILY_LIMIT: '0', RESUME: 'false', NODE_ENV: 'test',
+    ARCHIVE_MIN_GAP_MS: '0', ARCHIVE_RATE_PER_MIN: '600', // pacing is proven in archive.test.js with a controllable clock; here real time would only slow the run
   });
   for (const k of ['REDIS_URL', 'DATABASE_URL', 'PORT', 'WEBHOOK_DOMAIN', 'LIVE_CHANNEL_ID', 'VAULT_CHANNEL_ID', 'OPS_CHAT_ID']) delete process.env[k];
 
@@ -132,6 +133,7 @@ async function run() {
     const online = msgs(ADMIN).find((m) => /is online/.test(text(m)));
     assert.match(text(online), /Redis/);
     assert.match(text(online), /Updates by <b>polling<\/b>/);
+    assert.match(text(online), /Archive not connected yet[\s\S]*Live, Vault, Ops[\s\S]*\/archive setup/);   // nobody has to guess why nothing is archived
   });
 
   test('connecting spaces: adding the bot asks the admin, the buttons connect Live, Vault and Ops', async () => {
@@ -168,6 +170,110 @@ async function run() {
     assert.ok(buttons(after).length >= 3, 'the role buttons are still there');
     await tap(USER, { chat: USER, id: offer.id, markup: offer.markup }, `sp:live:${BAD}`);  // a non-admin pressing it changes nothing
     assert.match(text(msgs(ADMIN).find((m) => m.id === offer.id)), /Not yet: Live/);
+  });
+
+
+  // ---- the native way: Telegram's own chat picker
+  const replyKeyboard = (m) => (m.markup?.keyboard ?? []).flat();
+  const shareChat = (userId, request_id, chat_id, title = 'picked') => {
+    const ctx = ctxFor({ userId });
+    ctx.message = { message_id: ++seq, chat_shared: { request_id, chat_id, title } };
+    let passed = false;
+    return bot.ons.message(ctx, async () => { passed = true; }).then(() => ({ passed }));
+  };
+
+  test('native picker: /archive setup offers Telegram\'s chat picker with exactly the right options, plus add-me links', async () => {
+    await say(ADMIN, '/archive setup');
+    let m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /Everything is connected/);
+    assert.deepEqual(m.markup, { remove_keyboard: true }, 'nothing missing: the keyboard is removed');
+
+    await say(ADMIN, '/archive unset vault');
+    m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /Vault[\s\S]*disconnected\. Nothing was deleted/);
+    assert.deepEqual(replyKeyboard(m).map((b) => b.text), ['🗄 Choose the Vault channel'], 'the picker comes back for what is missing');
+
+    await say(ADMIN, '/archive setup');
+    m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /🗄 <b>Vault<\/b>  ⚪ not connected/);
+    assert.match(text(m), /📡 <b>Live<\/b>  🟢 Live/);
+    const [btn] = replyKeyboard(m);
+    assert.deepEqual(btn.request_chat, {
+      request_id: 2, chat_has_username: false, request_title: true, chat_is_channel: true,
+      user_administrator_rights: { can_post_messages: true }, bot_administrator_rights: { can_post_messages: true },
+    });
+    assert.equal(m.markup.one_time_keyboard, true);
+    assert.match(text(m), /<a href="https:\/\/t\.me\/testbot\?startchannel&amp;admin=post_messages\+edit_messages\+delete_messages">Add me to a channel as admin<\/a>/);
+    assert.match(text(m), /<a href="https:\/\/t\.me\/testbot\?startgroup&amp;admin=manage_topics">Add me to the Ops group<\/a>/);
+    assert.deepEqual(htmlProblems(text(m)), []);
+
+    // the three buttons, with the right kind of chat and rights each
+    await say(ADMIN, '/archive unset live');
+    await say(ADMIN, '/archive unset ops');
+    await say(ADMIN, '/archive setup');
+    const [live, vault, ops] = replyKeyboard(msgs(ADMIN).at(-1)).map((b) => b.request_chat);
+    assert.deepEqual([live.request_id, vault.request_id, ops.request_id], [1, 2, 3]);
+    assert.deepEqual(live.user_administrator_rights, { can_post_messages: true, can_edit_messages: true, can_delete_messages: true });
+    assert.equal(live.chat_is_channel, true);
+    assert.equal(ops.chat_is_channel, false);
+    assert.equal(ops.chat_is_forum, true);
+    assert.deepEqual(ops.bot_administrator_rights, { can_manage_topics: true });
+    for (const r of [live, vault, ops]) assert.equal(r.chat_has_username, false, 'private chats only');
+  });
+
+  test('native picker: chats chosen in it are connected, one by one, and the keyboard shrinks until it is gone', async () => {
+    const { passed } = await shareChat(ADMIN, 1, LIVE, 'Live');
+    assert.equal(passed, false, 'a shared chat is handled, not passed on');
+    let m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /✅ <b>Live<\/b> is now 📡 <b>Live<\/b>/);
+    assert.match(text(m), /Still to connect: Vault, Ops/);
+    assert.deepEqual(replyKeyboard(m).map((b) => b.request_chat.request_id), [2, 3]);
+
+    await shareChat(ADMIN, 2, VAULT, 'Vault');
+    assert.deepEqual(replyKeyboard(msgs(ADMIN).at(-1)).map((b) => b.request_chat.request_id), [3]);
+
+    await shareChat(ADMIN, 3, OPS, 'Ops');
+    m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /🎉 <b>All three spaces are connected\.<\/b>/);
+    assert.deepEqual(m.markup, { remove_keyboard: true });
+    assert.equal(world.chats.get(OPS).topics.length, 6, 'no duplicate topics when Ops is connected again');
+    await waitFor(() => opsPosts(TOPIC.admin).some((p) => /Space connected/.test(p.text) && /user #[0-9a-f]{4}/.test(p.text)), 6000, 'the Ops admin-action log');
+  });
+
+  test('native picker: a chat without the needed rights is explained and offered again; nonsense is refused cleanly', async () => {
+    const BAD2 = -1001000000010;
+    world.addChat(BAD2, { rights: { can_post_messages: true, can_edit_messages: true, can_delete_messages: false } });
+    await shareChat(ADMIN, 1, BAD2, 'Weak');
+    const m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /Not yet: Live/);
+    assert.match(text(m), /needs the right to delete/);
+    assert.ok(replyKeyboard(m).some((b) => b.request_chat.request_id === 1), 'Live is offered again');
+    await shareChat(ADMIN, 1, -999999999, 'Ghost');
+    assert.match(text(msgs(ADMIN).at(-1)), /Not yet: Live[\s\S]*chat not found/);
+    await shareChat(ADMIN, 77, LIVE, 'unknown request');                  // not one of ours: ignored
+    assert.match(text(msgs(ADMIN).at(-1)), /Not yet: Live[\s\S]*chat not found/, 'nothing new was sent');
+    assert.equal(await (async () => { const before = msgs(USER).length; await shareChat(USER, 1, BAD2, 'x'); return msgs(USER).length - before; })(), 0, 'only admins can connect spaces');
+    // the real Live is still the real Live
+    await say(ADMIN, '/archive setup');
+    assert.match(text(msgs(ADMIN).at(-1)), /Everything is connected/);
+  });
+
+  test('messages that are not a shared chat pass straight through to the other handlers', async () => {
+    const ctx = ctxFor({ userId: USER, text: 'hello' });
+    let passed = false;
+    await bot.ons.message(ctx, async () => { passed = true; });
+    assert.equal(passed, true);
+  });
+
+  test('/archive with something missing shows the picker right under the status', async () => {
+    await say(ADMIN, '/archive unset vault');
+    await say(ADMIN, '/archive');
+    const m = msgs(ADMIN).at(-1);
+    assert.match(text(m), /🗄 <b>Vault<\/b>  ⚪ not connected/);
+    assert.match(text(m), /👆 <i>Tap a button below/);
+    assert.deepEqual(replyKeyboard(m).map((b) => b.request_chat.request_id), [2]);
+    await shareChat(ADMIN, 2, VAULT, 'Vault');                           // put it back for the rest of the run
+    assert.match(text(msgs(ADMIN).at(-1)), /All three spaces are connected/);
   });
 
   test('/archive shows the three spaces; /archive test passes end to end; non-admins are refused', async () => {

@@ -331,19 +331,19 @@ export function createArchive({ store, api, cfg, now = () => Date.now(), alert =
     const live = await spaces.get('live');
     const vault = await spaces.get('vault');
     await step('Live: post and delete', async () => {
-      if (!live) throw new Error('not set');
+      if (!live) throw new Error('not connected: send /archive setup');
       const id = await probe(live);
       await api.deleteMessages(live, [id]);
       sent.pop();
     });
     await step('Vault: post and delete', async () => {
-      if (!vault) throw new Error('not set');
+      if (!vault) throw new Error('not connected: send /archive setup');
       const id = await probe(vault);
       await api.deleteMessages(vault, [id]);
       sent.pop();
     });
     await step('Live → Vault: copy, then clear Live', async () => {
-      if (!live || !vault) throw new Error('needs both Live and Vault');
+      if (!live || !vault) throw new Error('needs both Live and Vault: send /archive setup');
       const id = await probe(live);
       const copy = await api.copyMessage(vault, live, id, { caption: undefined });
       await api.deleteMessages(live, [id]);
@@ -351,7 +351,7 @@ export function createArchive({ store, api, cfg, now = () => Date.now(), alert =
       sent.length = 0;
     });
     await step('Ops: topics and a post', async () => {
-      if (!(await spaces.get('ops'))) throw new Error('not set');
+      if (!(await spaces.get('ops'))) throw new Error('not connected: send /archive setup');
       const r = await ops.ensureTopics();
       await ops.send('logs', `🧪 ${b('Self-test')} ${i('Ops can post')}`);
       return r.created.length ? `created ${r.created.length} topic${r.created.length === 1 ? '' : 's'}` : 'all topics present';
