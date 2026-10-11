@@ -133,7 +133,7 @@ const STEALTH_JS = `
   if (q) window.navigator.permissions.query = (p) => (p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : q.call(window.navigator.permissions, p));
 `;
 
-export async function renderWithBrowser(job, url, { stealth = false } = {}) {
+export async function renderWithBrowser(job, url, { stealth = false, screenshot = false } = {}) {
   const b = await acquire();
   let context;
   try {
@@ -193,9 +193,17 @@ export async function renderWithBrowser(job, url, { stealth = false } = {}) {
       await Promise.allSettled([...tasks]);
       html = await page.content();
     }
+    // the archive wants a picture of the page, and the browser is already here: one extra frame, no extra visit
+    let shot = null;
+    if (screenshot && !challenge) {
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      shot = await page.screenshot({ type: 'jpeg', quality: 62 }).catch(() => null);
+      if (shot && shot.length > 400 * 1024) shot = null; // keep outbox payloads small
+    }
     const originalHtml = mainResp ? await mainResp.text().catch(() => null) : null;
     return {
       html,
+      shot,
       challenge,
       originalHtml,
       finalUrl: page.url(),

@@ -31,6 +31,7 @@ export default {
     cancelled: '🛑 Cancelado.',
   },
   BTN: {
+    rescue: (date) => `📦 Cópia salva · ${date}`,
     cancel: '✖ Cancelar', preview: '🖼 Prévia', fresh: '🔄 Cópia nova', retry: '🔁 Tentar de novo',
     clearAll: '🗑 Limpar histórico', yesClear: 'Sim, limpar', keep: 'Manter',
     deleteData: '🗑 Apagar todos os meus dados', yesDelete: 'Sim, apagar tudo', help: '📖 Ajuda', back: '◀ Voltar',
@@ -48,7 +49,7 @@ export default {
     part: (i, n) => `📦 Parte ${i} de ${n}`,
     partsHint: (n) => `📦 Enviado em ${n} ZIPs. Descompacte todos em uma pasta e abra index.html.`,
     justNow: 'agora mesmo', mAgo: (m) => `há ${m} min`, hAgo: (h) => `há ${h} h`, dAgo: (d) => `há ${d} d`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Do seu histórico', unchanged: 'Continua atualizado', cache: 'Cópia instantânea' }[kind] || 'Cópia instantânea'} · salvo ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'Do seu histórico', unchanged: 'Continua atualizado', cache: 'Cópia instantânea', rescue: 'Cópia arquivada' }[kind] || 'Cópia instantânea'} · salvo ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Isso não parece um endereço de site. Tente algo como example.com',
@@ -64,6 +65,8 @@ export default {
     internal: '❌ Algo deu errado. Tente novamente.',
   },
   MSG: {
+    rescueNote: (date) => `📦 Tenho uma cópia salva de <b>${date}</b>.`,
+    rescueGone: 'Essa cópia salva não está mais disponível.',
     busy: '⏳ Seu último download ainda está em andamento. Envio assim que ficar pronto.',
     cooldown: (s) => `⏳ Um momento. Você poderá enviar o próximo link em ${s} s.`,
     daily: (n) => `📅 Você atingiu o limite de hoje: ${n} downloads novos. Reinicia à meia-noite UTC. Sites já salvos e prévias continuam funcionando.`,

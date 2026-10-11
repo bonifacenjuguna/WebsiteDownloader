@@ -31,6 +31,7 @@ export default {
     cancelled: '🛑 Abgebrochen.',
   },
   BTN: {
+    rescue: (date) => `📦 Gespeicherte Kopie · ${date}`,
     cancel: '✖ Abbrechen', preview: '🖼 Vorschau', fresh: '🔄 Neue Kopie', retry: '🔁 Nochmal versuchen',
     clearAll: '🗑 Verlauf löschen', yesClear: 'Ja, löschen', keep: 'Behalten',
     deleteData: '🗑 Alle meine Daten löschen', yesDelete: 'Ja, alles löschen', help: '📖 Hilfe', back: '◀ Zurück',
@@ -48,7 +49,7 @@ export default {
     part: (i, n) => `📦 Teil ${i} von ${n}`,
     partsHint: (n) => `📦 In ${n} ZIPs gesendet. Alle in einen Ordner entpacken, dann index.html öffnen.`,
     justNow: 'gerade eben', mAgo: (m) => `vor ${m} Min.`, hAgo: (h) => `vor ${h} Std.`, dAgo: (d) => `vor ${d} T.`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Aus deinem Verlauf', unchanged: 'Noch aktuell', cache: 'Sofortkopie' }[kind] || 'Sofortkopie'} · gespeichert ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'Aus deinem Verlauf', unchanged: 'Noch aktuell', cache: 'Sofortkopie', rescue: 'Archivierte Kopie' }[kind] || 'Sofortkopie'} · gespeichert ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Das sieht nicht nach einer Website-Adresse aus. Versuch etwas wie example.com',
@@ -64,6 +65,8 @@ export default {
     internal: '❌ Etwas ist schiefgelaufen. Bitte versuche es erneut.',
   },
   MSG: {
+    rescueNote: (date) => `📦 Ich habe eine gespeicherte Kopie vom <b>${date}</b>.`,
+    rescueGone: 'Diese gespeicherte Kopie ist nicht mehr verfügbar.',
     busy: '⏳ Dein letzter Download läuft noch. Ich sende ihn, sobald er fertig ist.',
     cooldown: (s) => `⏳ Einen Moment. Den nächsten Link kannst du in ${s} s senden.`,
     daily: (n) => `📅 Du hast das Tageslimit von ${n} neuen Downloads erreicht. Es wird um Mitternacht UTC zurückgesetzt. Bereits gespeicherte Seiten und Vorschauen funktionieren weiterhin.`,

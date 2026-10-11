@@ -31,6 +31,7 @@ export default {
     cancelled: '🛑 Imeghairiwa.',
   },
   BTN: {
+    rescue: (date) => `📦 Nakala iliyohifadhiwa · ${date}`,
     cancel: '✖ Ghairi', preview: '🖼 Muonekano', fresh: '🔄 Nakala mpya', retry: '🔁 Jaribu tena',
     clearAll: '🗑 Futa historia', yesClear: 'Ndiyo, futa', keep: 'Iache',
     deleteData: '🗑 Futa data yangu yote', yesDelete: 'Ndiyo, futa yote', help: '📖 Msaada', back: '◀ Rudi',
@@ -48,7 +49,7 @@ export default {
     part: (i, n) => `📦 Sehemu ${i} kati ya ${n}`,
     partsHint: (n) => `📦 Imetumwa kama ZIP ${n}. Zifungue zote kwenye folda moja, kisha fungua index.html.`,
     justNow: 'sasa hivi', mAgo: (m) => `dakika ${m} zilizopita`, hAgo: (h) => `saa ${h} zilizopita`, dAgo: (d) => `siku ${d} zilizopita`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Kutoka historia yako', unchanged: 'Bado ni ya kisasa', cache: 'Nakala ya papo hapo' }[kind] || 'Nakala ya papo hapo'} · imehifadhiwa ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'Kutoka historia yako', unchanged: 'Bado ni ya kisasa', cache: 'Nakala ya papo hapo', rescue: 'Nakala ya kumbukumbu' }[kind] || 'Nakala ya papo hapo'} · imehifadhiwa ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Hiyo haionekani kama anwani ya tovuti. Jaribu kama example.com',
@@ -64,6 +65,8 @@ export default {
     internal: '❌ Hitilafu imetokea. Tafadhali jaribu tena.',
   },
   MSG: {
+    rescueNote: (date) => `📦 Nina nakala iliyohifadhiwa ya <b>${date}</b>.`,
+    rescueGone: 'Nakala hiyo iliyohifadhiwa haipatikani tena.',
     busy: '⏳ Upakuaji wako wa mwisho bado unaendelea. Nitakutumia mara tu utakapokuwa tayari.',
     cooldown: (s) => `⏳ Subiri kidogo. Unaweza kutuma kiungo kinachofuata baada ya sekunde ${s}.`,
     daily: (n) => `📅 Umefikia kikomo cha leo cha upakuaji mpya ${n}. Kinaanza upya usiku wa manane UTC. Tovuti zilizohifadhiwa na muonekano bado vinafanya kazi.`,

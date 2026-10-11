@@ -57,9 +57,70 @@ const MIGRATIONS = [
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   `,
+  // v1.9: the archive (Live / Vault channels) and its durable outbox. No table here has a user column.
+  `
+  CREATE TABLE archive_entries (
+    id              BIGSERIAL PRIMARY KEY,
+    url_key         TEXT NOT NULL,
+    host            TEXT NOT NULL,
+    title           TEXT,
+    url             TEXT,
+    tag             TEXT NOT NULL,
+    file_ids        TEXT NOT NULL DEFAULT '',
+    file_name       TEXT,
+    parts           INTEGER NOT NULL DEFAULT 1,
+    pages           INTEGER NOT NULL DEFAULT 0,
+    files           INTEGER NOT NULL DEFAULT 0,
+    zip_bytes       BIGINT NOT NULL DEFAULT 0,
+    mode            TEXT,
+    kind            TEXT,
+    preview_file_id TEXT,
+    live_chat       BIGINT,
+    live_posts      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    live_link       TEXT,
+    live_expires_at TIMESTAMPTZ,
+    vault_chat      BIGINT,
+    vault_posts     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    vault_link      TEXT,
+    vaulted_at      TIMESTAMPTZ,
+    state           TEXT NOT NULL DEFAULT 'pending',
+    error           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX archive_entries_key_idx    ON archive_entries (url_key, created_at DESC);
+  CREATE INDEX archive_entries_host_idx   ON archive_entries (host, created_at DESC);
+  CREATE INDEX archive_entries_expiry_idx ON archive_entries (live_expires_at) WHERE state = 'live';
+  CREATE INDEX archive_entries_state_idx  ON archive_entries (state, created_at);
+  CREATE TABLE archive_outbox (
+    id           BIGSERIAL PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    role         TEXT NOT NULL,
+    payload      JSONB NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending',
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    run_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    locked_until TIMESTAMPTZ,
+    dedupe_key   TEXT,
+    last_error   TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX archive_outbox_due_idx ON archive_outbox (run_at) WHERE state = 'pending';
+  CREATE UNIQUE INDEX archive_outbox_dedupe_idx ON archive_outbox (dedupe_key) WHERE dedupe_key IS NOT NULL AND state IN ('pending', 'running');
+  CREATE TABLE archive_settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  `,
 ];
 
 export const enabled = () => pool !== null;
+
+// like q(), but a failure is thrown instead of swallowed: the archive outbox must know a write did not happen
+export async function queryStrict(text, params = []) {
+  if (!pool) throw new Error('database is off');
+  return (await pool.query(text, params)).rows;
+}
 
 async function q(text, params = []) {
   if (!pool) return null;
@@ -287,6 +348,30 @@ export async function stats() {
   return { ...main[0], ok7: Number(w.ok7 || 0), failed7: Number(w.failed7 || 0), ours7: Number(w.ours7 || 0),
     p50: w.p50 == null ? null : Number(w.p50), p95: w.p95 == null ? null : Number(w.p95),
     hosts: hosts || [], errors: errors || [], phases };
+}
+
+// The last 24 hours, for the daily digest posted to Ops
+export async function digest24h() {
+  const w = "created_at > now() - interval '24 hours'";
+  const main = await q(
+    `SELECT count(*) FILTER (WHERE status = 'ok' AND NOT cached) AS ok,
+            count(*) FILTER (WHERE status = 'failed') AS failed,
+            count(*) FILTER (WHERE cached AND status = 'ok') AS cached,
+            count(*) FILTER (WHERE status = 'failed' AND COALESCE(error_code, 'unknown') <> ALL($1::text[])) AS ours,
+            percentile_cont(0.5)  WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE status = 'ok' AND NOT cached) AS p50,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE status = 'ok' AND NOT cached) AS p95
+       FROM downloads WHERE ${w}`,
+    [[...VISITOR_CODES]]
+  );
+  if (!main) return null;
+  const hosts = await q(`SELECT host, count(*) AS c FROM downloads WHERE ${w} GROUP BY host ORDER BY c DESC LIMIT 5`);
+  const errors = await q(`SELECT COALESCE(error_code, 'unknown') AS code, count(*) AS c FROM downloads WHERE status = 'failed' AND ${w} GROUP BY 1 ORDER BY c DESC LIMIT 5`);
+  const m = main[0];
+  const n = (v) => (v == null ? null : Number(v));
+  return {
+    jobs: { ok: n(m.ok) || 0, failed: n(m.failed) || 0, cached: n(m.cached) || 0, ours: n(m.ours) || 0, p50: n(m.p50), p95: n(m.p95) },
+    hosts: hosts || [], errors: errors || [],
+  };
 }
 
 // Old rows are deleted after RETENTION_DAYS, or after the number of days a person chose in /privacy (0 = keep).

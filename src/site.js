@@ -255,11 +255,11 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   let browserBudget = CFG.siteMaxPagesBrowser; // how many pages may use the (slow) browser
   let stealth = false;                         // once the plain browser was turned away, later pages start stealthy
   let thinMisses = 0;                          // thin pages where rendering added nothing: stop trying after a few
-  const render = async (url) => {
+  const render = async (url, { screenshot = false } = {}) => {
     const attempt = async (st) => {
       try {
-        const r = await browserSem.run(() => renderWithBrowser(job, url, { stealth: st }));
-        return r.challenge ? { fail: 'challenge' } : { html: r.html, finalUrl: r.finalUrl, original: r.originalHtml };
+        const r = await browserSem.run(() => renderWithBrowser(job, url, { stealth: st, screenshot }));
+        return r.challenge ? { fail: 'challenge' } : { html: r.html, finalUrl: r.finalUrl, original: r.originalHtml, shot: r.shot };
       } catch (e) { return { fail: e?.message || 'browser error' }; }
     };
     let got = await attempt(stealth);
@@ -270,10 +270,10 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     }
     return got;
   };
-  const tryBrowser = async (url) => {
+  const tryBrowser = async (url, opts) => {
     if (!browserOn || browserBudget <= 0) return { fail: 'browser not available' };
     browserBudget--;
-    return render(url);
+    return render(url, opts);
   };
 
   // ---- the first page ----
@@ -281,11 +281,12 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   let startHtml = html0;
   let startRendered = false;
   let startOriginal = null;
+  let startShot = null;
   let spaSite = false;
   const trouble = check.challenge ? 'challenge' : looksLikeSpa(html0) ? 'spa' : looksThin(html0) ? 'thin' : null;
   if (trouble && browserOn) {
     onStatus(S.browser);
-    const r = await tryBrowser(first.finalUrl);
+    const r = await tryBrowser(first.finalUrl, { screenshot: true }); // the archive gets a preview picture for free
     if (r.fail) {
       if (check.challenge) throw new UserError(check.fatal, check.code);
       if (trouble === 'spa') warnings.push({ c: 'browserFallback' });
@@ -295,6 +296,7 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
       startHtml = r.html;
       startRendered = true;
       startOriginal = r.original;
+      startShot = r.shot || null;
       spaSite = trouble !== 'thin';
     }
     timings.browser = Date.now() - t;
@@ -579,5 +581,6 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
     pages: pages.size, fileCount: job.files.size + pages.size, zipBytes,
     mode: anyRendered ? 'site-browser' : 'site-pages', warnings, skipped: job.skipped.length, failed: job.failed.length,
     timings, fingerprint, linkCheck: linkStats,
+    preview: startRendered ? startShot : null, // only when the browser rendered the page anyway
   };
 }

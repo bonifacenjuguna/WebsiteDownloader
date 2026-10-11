@@ -10,6 +10,7 @@ export const GROUPS = [
   ['cache', 'Caching and history', 'How long things are remembered.'],
   ['browser', 'Chromium (dynamic and protected sites)', 'Used automatically when a plain fetch is not enough.'],
   ['resources', 'Memory and disk protection', 'Keeps a small instance from running out of room.'],
+  ['archive', 'Archive and Ops channels', 'Three private spaces: Live (current items), Vault (cold storage) and Ops (alerts, errors, digest, logs). Add the bot as admin and it asks you which is which, so the IDs below are optional.'],
   ['reliable', 'Restarts, deploys and big files', 'Resume, webhook mode and the self-hosted Bot API.'],
   ['observe', 'Health, metrics and logs', 'Watching the bot.'],
 ];
@@ -77,6 +78,17 @@ export const VARS = [
   // resources
   ['resources', 'MEM_ADMIT_RATIO', '0.92', 'An extra parallel job waits while the container is above this share of memory.'],
   ['resources', 'DISK_MIN_MB', '700', 'An extra parallel job waits while the temp disk has less free space than this. 0 = off.'],
+  // archive
+  ['archive', 'ARCHIVE', 'true', 'Master switch for the archive. false = nothing is posted to Live or the Vault (Ops still works).'],
+  ['archive', 'LIVE_CHANNEL_ID', '', 'Optional: chat id of the Live channel (like -1001234567890). Blank = assign it with the buttons the bot sends you.'],
+  ['archive', 'VAULT_CHANNEL_ID', '', 'Optional: chat id of the Vault channel. Blank = assign it with the buttons.'],
+  ['archive', 'OPS_CHAT_ID', '', 'Optional: chat id of the Ops forum group (Topics turned on). Blank = assign it with the buttons.'],
+  ['archive', 'LIVE_RETENTION_HOURS', '168', 'How long an item stays in Live before it is copied to the Vault and cleared (168 = 7 days).'],
+  ['archive', 'ARCHIVE_RATE_PER_MIN', '15', 'Posts per minute into one channel. Telegram allows about 20.'],
+  ['archive', 'RESCUE', 'true', 'When a site is down, blocked or gone, offer the last archived copy.'],
+  ['archive', 'OPS_DIGEST', 'true', 'Post one daily summary to the Ops group.'],
+  ['archive', 'DIGEST_HOUR_UTC', '6', 'Hour of day (UTC, 0-23) after which the daily digest is posted.'],
+  ['archive', 'SLOW_JOB_SEC', '120', 'Jobs slower than this many seconds are noted in the Ops logs.'],
   // reliable
   ['reliable', 'RESUME', 'true', 'Continue unfinished jobs after a restart (needs Redis).'],
   ['reliable', 'RESUME_MAX_MIN', '30', 'Oldest interrupted job, in minutes, that is still resumed.'],

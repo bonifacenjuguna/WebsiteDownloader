@@ -31,6 +31,7 @@ export default {
     cancelled: '🛑 Annulé.',
   },
   BTN: {
+    rescue: (date) => `📦 Copie sauvegardée · ${date}`,
     cancel: '✖ Annuler', preview: '🖼 Aperçu', fresh: '🔄 Copie à jour', retry: '🔁 Réessayer',
     clearAll: '🗑 Effacer l’historique', yesClear: 'Oui, effacer', keep: 'Garder',
     deleteData: '🗑 Supprimer toutes mes données', yesDelete: 'Oui, tout supprimer', help: '📖 Aide', back: '◀ Retour',
@@ -48,7 +49,7 @@ export default {
     part: (i, n) => `📦 Partie ${i} sur ${n}`,
     partsHint: (n) => `📦 Envoyé en ${n} ZIP. Décompressez-les tous dans un seul dossier, puis ouvrez index.html.`,
     justNow: 'à l’instant', mAgo: (m) => `il y a ${m} min`, hAgo: (h) => `il y a ${h} h`, dAgo: (d) => `il y a ${d} j`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Depuis votre historique', unchanged: 'Toujours à jour', cache: 'Copie instantanée' }[kind] || 'Copie instantanée'} · enregistré ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'Depuis votre historique', unchanged: 'Toujours à jour', cache: 'Copie instantanée', rescue: 'Copie archivée' }[kind] || 'Copie instantanée'} · enregistré ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Cela ne ressemble pas à une adresse web. Essayez par exemple example.com',
@@ -64,6 +65,8 @@ export default {
     internal: '❌ Une erreur s’est produite. Réessayez.',
   },
   MSG: {
+    rescueNote: (date) => `📦 J’ai une copie sauvegardée du <b>${date}</b>.`,
+    rescueGone: 'Cette copie sauvegardée n’est plus disponible.',
     busy: '⏳ Votre dernier téléchargement est encore en cours. Je vous l’envoie dès qu’il est prêt.',
     cooldown: (s) => `⏳ Un instant. Vous pourrez envoyer le prochain lien dans ${s} s.`,
     daily: (n) => `📅 Vous avez atteint la limite du jour : ${n} nouveaux téléchargements. Elle se réinitialise à minuit UTC. Les sites déjà enregistrés et les aperçus restent disponibles.`,

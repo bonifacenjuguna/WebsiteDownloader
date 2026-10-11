@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.9.0 - The archive: Live, Vault and Ops
+Three private spaces, set up by adding the bot as admin and tapping a button.
+- **Live (channel):** every successful build is posted in the background by reusing the same Telegram file (no second upload), with a searchable label (`#example_com #2026_10 #id_a3f9c2`), a preview picture when one already exists, and the expiry date. Several ZIPs become *Part i of n* replies.
+- **Vault (channel):** at `LIVE_RETENTION_HOURS` (default 168) the item is copied to the Vault, its links are saved, and only then is it cleared from Live. Nothing is ever removed from the Vault. If the copy fails the Live post stays and Ops alerts you; a Live post deleted by hand is rebuilt from the saved files.
+- **Ops (forum group):** six topics created by the bot: Alerts, Errors, Deploys, Daily digest, Logs, Admin actions, each with its own notification setting. Alerts, deploys and failures of our own go here as well as to admin DMs. One digest a day. A topic deleted by hand is recreated.
+- **Rescue:** when a site is down, blocked, gone or timing out, the person is offered *"📦 Saved copy · Oct 3"*, in all 7 languages. If the file reference has expired the ZIP is copied straight from the channel post.
+- **Durable outbox** (Postgres): restarts lose nothing, retries back off, Telegram 429s are honoured, per-channel pacing (`ARCHIVE_RATE_PER_MIN`), claims expire so a crash hands the job on and two instances never do the same one, repair of half-finished items.
+- **Self-setup:** `my_chat_member` updates make the bot DM admins Live / Vault / Ops buttons, check kind and rights, and say exactly what is missing. `LIVE_CHANNEL_ID`, `VAULT_CHANNEL_ID`, `OPS_CHAT_ID` override.
+- **`/archive`:** status, `test` (proves the database, posting, deleting, copying and topics work in your setup), `example.com` (find with links), `retry`, `expire`, `unset`.
+- **Privacy by design:** no user id, name or username in any post or record, no user column in any archive table, so *Delete all my data* never touches the archive. Ops shows only a hashed tag (`user #a3f9`).
+- A browser-rendered first page now also yields a preview picture for the archive (one extra frame, no extra visit).
+- Fixed: result captions are bounded by construction (never cut mid-tag).
+- New settings: `ARCHIVE`, `LIVE_CHANNEL_ID`, `VAULT_CHANNEL_ID`, `OPS_CHAT_ID`, `LIVE_RETENTION_HOURS`, `ARCHIVE_RATE_PER_MIN`, `RESCUE`, `OPS_DIGEST`, `DIGEST_HOUR_UTC`, `SLOW_JOB_SEC` (all in `.env`).
+- Database migration 4 adds `archive_entries`, `archive_outbox`, `archive_settings`.
+- **Tests:** 60 unit and lifecycle tests (a simulated Telegram with message ids, copy, delete, 429, kicked bots, missing posts, forum topics; archive lifecycle, rate limiting, crash recovery, rescue, labels, digest, self-test) plus `npm run test:bot`, which runs the real `index.js` end to end: connecting spaces, a user download, archiving, instant repeats, rescue, error reporting, cancel, plain-text fallback, and a check that every message sent is valid Telegram HTML.
+
 ## 1.8.1 - One place for every setting
 - **`.env` included.** Every variable the bot reads, grouped, with a one-line explanation above each and the built-in default as its value (blank = off). It behaves exactly like having no file at all, so you change only what you need: on Railway paste just those lines into *Variables -> Raw Editor*; locally run `npm run dev`. `.env` stays out of git and the Docker image (`.gitignore`, `.dockerignore`).
 - **One source of truth:** `scripts/env-vars.js`. `npm run env` regenerates `.env`, `.env.example` and the new configuration reference table in the README (every variable, its default and what it does).

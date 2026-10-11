@@ -14,7 +14,7 @@ import { warmBrowser, verifyBrowser, closeBrowser, screenshotPage, browserSem, b
 import { makeUpdater } from './updater.js';
 import { syncProfile } from './profile.js';
 import { renderMenu, renderPage } from './help.js';
-import { tr, LANGS, mapLang, buildSummary, codeOf } from './copy.js';
+import { tr, LANGS, mapLang, buildSummary, codeOf, RESCUE_CODES, size } from './copy.js';
 import * as db from './db.js';
 import { initStore, closeStore, cache, limits, previews, quota, lang as langStore, kvMode, kv } from './store.js';
 import * as policy from './policy.js';
@@ -28,7 +28,13 @@ import * as sharedCache from './sharedcache.js';
 import { startHousekeeping, canStartMore, diskFreeMb } from './housekeeping.js';
 import { syncCommands } from './commands.js';
 import { memoryShare, memoryMb } from './health-util.js';
-import { esc, b, i, code, dot, ms as fmtMs, uptime as fmtUptime, utc, table, stripTags } from './fmt.js';
+import { esc, b, i, code, code as mono, dot, ms as fmtMs, uptime as fmtUptime, utc, table, stripTags } from './fmt.js';
+import { createArchive } from './archive/service.js';
+import { MemoryStore, PgStore } from './archive/store.js';
+import { makeApi } from './archive/telegram.js';
+import { RateLimiter } from './archive/limiter.js';
+import { ROLES, ROLE_INFO } from './archive/spaces.js';
+import { VISITOR_CODES } from './codes.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -72,6 +78,23 @@ let stopSharedCache = null;
 let mode = 'polling'; // or 'webhook'
 const startedAt = Date.now();
 
+// ---------- the archive: Live and Vault channels, and the Ops group ----------
+// The store is chosen at startup (Postgres when it is on, memory otherwise); handlers can be registered before that.
+const archiveStore = new Proxy({ impl: new MemoryStore() }, {
+  get: (t, k) => (k === 'impl' ? t.impl : typeof t.impl[k] === 'function' ? (...a) => t.impl[k](...a) : t.impl[k]),
+  set: (t, k, v) => { t[k] = v; return true; },
+});
+let botIdValue = 0;
+const archive = createArchive({
+  store: archiveStore,
+  api: makeApi((method, payload) => bot.telegram.callApi(method, payload), new RateLimiter({ perMinute: CFG.archiveRatePerMin })),
+  cfg: {
+    enabled: CFG.archive, retentionMs: CFG.liveRetentionMs, digestEnabled: CFG.digestEnabled, digestHour: CFG.digestHour,
+    env: { live: CFG.liveChatId, vault: CFG.vaultChatId, ops: CFG.opsChatId },
+  },
+  secret: CFG.token, botId: () => botIdValue, alert: (html) => alertEverywhere(html), log: console,
+});
+
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
 const argOf = (ctx) => ctx.message.text.split(/\s+/)[1];
 const restOf = (ctx) => ctx.message.text.replace(/^\/\S+\s*/, '');
@@ -88,11 +111,17 @@ const denyAdmin = async (ctx) => { const L = await Lof(ctx); return ctx.reply(CF
 const chunk2 = (arr) => { const out = []; for (let i = 0; i < arr.length; i += 2) out.push(arr.slice(i, i + 2)); return out; };
 const buttons = (key, actions) => Markup.inlineKeyboard(chunk2(actions.map((a) => Markup.button.callback(a.text, `${a.cb}:${key}`))));
 const keyboard = (L, key, opts) => buttons(key, L.actionsFor(opts));
-// the one useful alternative after a failure (Try again), or nothing
-const failureMarkup = (L, code, key) => {
-  const actions = L.failureActions(code);
-  return actions.length ? buttons(key, actions) : null;
+// after a failure: a saved copy when the archive has one, then the one useful alternative (Try again), or nothing
+const failureMarkup = (L, code, key, rescue = null) => {
+  const retry = L.failureActions(code).map((a) => Markup.button.callback(a.text, `${a.cb}:${key}`));
+  const rows = [...(rescue ? [[Markup.button.callback(L.BTN.rescue(L.date(rescue.createdAt)), `ar:${rescue.id}`)]] : []), ...chunk2(retry)];
+  return rows.length ? Markup.inlineKeyboard(rows) : null;
 };
+// the newest archived copy of this site, when the live one could not be saved (only a copy that still has its files)
+async function rescueFor(code, key) {
+  if (!CFG.rescue || !CFG.archive || !RESCUE_CODES.has(code)) return null;
+  try { const e = await archive.latestFor(key); return e && e.fileIds.length ? e : null; } catch { return null; }
+}
 const NO_KB = { reply_markup: { inline_keyboard: [] } };
 
 // help.js returns plain {text, data} rows; turn them into Telegram buttons
@@ -303,6 +332,7 @@ for (const [cmd, flag] of [['ban', true], ['unban', false]]) {
     if (flag && CFG.adminIds.includes(id)) return ctx.reply(L.MSG.adminSelf);
     const ok = await db.setBanned(id, flag);
     await ctx.reply(ok ? `${flag ? '🚫' : '✅'} ${code(id)} ${flag ? 'banned' : 'unbanned'}.` : `⚠️ ${i('User not found (or Postgres is off).')}`);
+    if (ok) archive.ops.post('admin', `🛡 ${b(flag ? 'Banned' : 'Unbanned')} ${code(id)}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
   });
 }
 
@@ -336,6 +366,7 @@ bot.command('ping', async (ctx) => {
     `🚦 Queue  ${queue.active} active  ·  ${queue.waiting.length} waiting  ·  ${flights.size} in flight${queue.throttled ? `  ·  ${queue.throttled} paused for resources` : ''}`,
     `🧩 Shared cache  ${sc.enabled ? `${code(`${sc.hits} hits`)}  ·  ${code(`${Math.round(sc.approxBytes / 1048576)} MB`)}` : code('off')}`,
     `📡 Updates by ${b(mode)}${CFG.telegramApiRoot ? '  ·  local Bot API' : ''}`,
+    ...(CFG.archive ? [`📦 Archive  live ${archive.snapshot().live}  ·  vault ${archive.snapshot().vaulted}  ·  waiting ${archive.snapshot().waiting}${archive.snapshot().problems ? `  ·  ⚠️ ${archive.snapshot().problems} need attention` : ''}`] : []),
   ].join('\n');
   await ctx.telegram.editMessageText(ctx.chat.id, m.message_id, undefined, text).catch(() => ctx.reply(text));
 });
@@ -350,6 +381,7 @@ bot.command('block', async (ctx) => {
   if (!policy.validDomain(arg)) return ctx.reply(`${b('Usage')}  ${code('/block domain.com')}`);
   const d = await policy.addBlocked(arg, ctx.from.id);
   await ctx.reply(`🚫 ${code(d)} ${i('and its subdomains are now blocked.')}`);
+  archive.ops.post('admin', `🛡 ${b('Blocked domain')} ${code(d)}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
 });
 bot.command('unblock', async (ctx) => {
   if (!isAdmin(ctx)) return denyAdmin(ctx);
@@ -357,6 +389,7 @@ bot.command('unblock', async (ctx) => {
   if (!arg) return ctx.reply(`${b('Usage')}  ${code('/unblock domain.com')}`);
   const had = await policy.removeBlocked(arg);
   await ctx.reply(had ? `✅ ${code(arg)} ${i('unblocked.')}` : `ℹ️ ${code(arg)} ${i("wasn't blocked.")}`);
+  if (had) archive.ops.post('admin', `🛡 ${b('Unblocked domain')} ${code(arg)}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
 });
 
 // /help: topic buttons swap the message in place; ◀ ▶ page through; 🏠 menu; ✖ close
@@ -388,6 +421,27 @@ bot.action(/^p:([a-f0-9]{40})$/, async (ctx) => {
   sendPreview(ctx, url, L).catch(console.error);
 });
 
+// 📦 Saved copy: the site could not be saved just now, so the archive hands back the last copy it has
+bot.action(/^ar:(\d+)$/, async (ctx) => {
+  const L = await Lof(ctx);
+  await ctx.answerCbQuery('📦').catch(() => {});
+  if (!(await authorize(ctx, L))) return;
+  const entry = await archive.getEntry(Number(ctx.match[1])).catch(() => null);
+  if (!entry?.fileIds.length) return ctx.reply(L.MSG.rescueGone);
+  // the same card a normal result has, built from what the archive remembers
+  const summary = JSON.stringify({ v: 1, kind: entry.kind, host: entry.host, title: entry.title, pages: entry.pages, files: entry.files, dirs: 0, bytes: entry.bytes, parts: entry.parts, notes: [] });
+  let sent = await sendStored(ctx, { fileId: entry.fileIds.join(','), caption: summary, at: entry.createdAt, urlKey: entry.urlKey }, 'rescue', L);
+  if (!sent) { // the Telegram file reference expired: copy the ZIP straight from the Live or Vault post instead
+    try {
+      const footer = `\n\n${i(L.CAP.footer('rescue', L.ago(Date.now() - entry.createdAt)))}`;
+      sent = await archive.copyZipsTo(ctx.chat.id, entry, (part, of) => (of > 1 ? b(L.CAP.part(part, of)) : `${L.caption(summary)}${footer}`));
+    } catch { sent = false; }
+  }
+  if (!sent) return ctx.reply(L.MSG.rescueGone);
+  metrics.inc('wd_cache_total', { kind: 'rescue' });
+  archive.ops.post('logs', `📦 ${esc(entry.host)}  ${i('saved copy sent')}  ${mono(`#id_${entry.tag}`)}  ·  ${archive.userTag(ctx.from.id)}`);
+});
+
 // ✖ Cancel under the progress message
 bot.action(/^x:([a-f0-9]{40})$/, async (ctx) => {
   const L = await Lof(ctx);
@@ -398,6 +452,130 @@ bot.action(/^x:([a-f0-9]{40})$/, async (ctx) => {
   await ctx.answerCbQuery(L.STATUS.cancelling).catch(() => {});
   if (me.leader) { me.update(L.STATUS.cancelling); f.controller.abort(); } // the job notices at its next checkpoint
   else { me.cancelled = true; f.members.delete(ctx.from.id); me.update(L.STATUS.cancelled, null); }
+});
+
+// ---------- connecting the Live / Vault / Ops spaces ----------
+// Add the bot as admin to a channel or group and it messages every admin with buttons: what is this chat for?
+async function offerSpace(chatId) {
+  if (!CFG.adminIds.length) { console.log('[archive] added to a chat, but ADMIN_IDS is not set so nobody can be asked what it is for'); return; }
+  let info = null;
+  try { info = await archive.inspect(chatId); } catch (e) { console.warn('[archive] could not inspect the new chat:', e?.message); }
+  const title = info?.chat?.title || String(chatId);
+  const current = await archive.spaces.roleOf(chatId).catch(() => null);
+  const lines = [
+    `➕ ${b('I was added to a chat')}`,
+    `${b(esc(title))}  ·  ${i(info?.chat?.type || 'unknown')}  ·  ${mono(chatId)}`,
+    ...(current ? [`${i(`It is currently the ${ROLE_INFO[current].name} space.`)}`] : []),
+    '',
+    ...ROLES.map((r) => {
+      const probs = info?.fits[r] ?? ['could not check'];
+      return `${ROLE_INFO[r].icon} ${b(ROLE_INFO[r].name)}  ${probs.length ? `⚠️ ${i(esc(probs.join('; ')))}` : '✅'}\n${i(ROLE_INFO[r].what)}`;
+    }),
+    '',
+    i('Choose what this chat is for. ⚠️ means something is still missing: fix it, then tap again.'),
+  ];
+  const kb = Markup.inlineKeyboard([
+    ...ROLES.map((r) => [Markup.button.callback(`${info?.fits[r]?.length ? '⚠️' : ROLE_INFO[r].icon} ${ROLE_INFO[r].name}`, `sp:${r}:${chatId}`)]),
+    [Markup.button.callback('Ignore', `sp:no:${chatId}`)],
+  ]);
+  for (const id of CFG.adminIds) await bot.telegram.sendMessage(id, lines.join('\n'), kb).catch(() => {});
+}
+
+bot.on('my_chat_member', async (ctx) => {
+  const u = ctx.update.my_chat_member;
+  if (u.chat.type === 'private') return;
+  const status = u.new_chat_member.status;
+  if (status === 'administrator' && u.old_chat_member.status !== 'administrator') return offerSpace(u.chat.id);
+  if (status === 'left' || status === 'kicked') {
+    const role = await archive.spaces.roleOf(u.chat.id).catch(() => null);
+    if (role) await alertEverywhere(`⚠️ ${b(`I was removed from the ${ROLE_INFO[role].name} space`)}\n${esc(u.chat.title || '')}\n${i('Add me back as admin, or connect another chat.')}`);
+  }
+});
+
+bot.action(/^sp:(live|vault|ops|no):(-?\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Admins only', { show_alert: true }).catch(() => {});
+  const [, role, id] = ctx.match;
+  if (role === 'no') {
+    await ctx.answerCbQuery().catch(() => {});
+    return ctx.editMessageText(`➖ ${i('Ignored.')}`, NO_KB).catch(() => {});
+  }
+  await ctx.answerCbQuery('…').catch(() => {});
+  const r = await archive.assign(role, Number(id));
+  if (r.ok) {
+    const topics = r.topics?.created?.length ? `\n${i(`Created ${r.topics.created.length} topic${r.topics.created.length === 1 ? '' : 's'}.`)}` : '';
+    await ctx.editMessageText(`✅ ${b(esc(r.title || id))} is now ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)}\n${i(ROLE_INFO[role].what)}${topics}\n\n${i('Send /archive test to check everything end to end.')}`, NO_KB).catch(() => {});
+    archive.ops.post('admin', `🛡 ${b('Space connected')}  ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)}\n${esc(r.title || id)}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
+  } else {
+    // keep the buttons: fix the problem in Telegram, then tap again
+    const keep = ctx.callbackQuery.message?.reply_markup ? { reply_markup: ctx.callbackQuery.message.reply_markup } : NO_KB;
+    await ctx.editMessageText(`⚠️ ${b(`Not yet: ${ROLE_INFO[role].name}`)}\n${r.problems.map((p) => `• ${esc(p)}`).join('\n')}\n\n${i('Fix this in the chat settings, then tap again.')}`, keep).catch(() => {});
+  }
+});
+
+// ---------- /archive (admins): status, test, search, retry ----------
+const STATE_ICON = { pending: '⏳', live: '📡', vaulting: '🔄', vaulted: '🗄', failed: '❌', vault_failed: '⚠️' };
+async function archiveStatus() {
+  const spaces = await archive.describe();
+  const snap = await archive.refreshSnapshot().catch(() => archive.snapshot());
+  const durable = archiveStore.impl.durable;
+  return [
+    `📦 ${b('Archive')}  ${i(durable ? 'Postgres' : 'memory only: nothing survives a restart')}`,
+    ...(CFG.archive ? [] : [`⚠️ ${b('Recording is turned off')}  ${i('(ARCHIVE=false): new builds are not posted and rescue is off. Ops still works.')}`]),
+    '',
+    ...ROLES.map((r) => `${ROLE_INFO[r].icon} ${b(ROLE_INFO[r].name)}  ${spaces[r] ? `🟢 ${esc(spaces[r].title)}` : '⚪ not connected'}`),
+    '',
+    `📡 Live ${mono(snap.live)}  ·  🗄 Vault ${mono(snap.vaulted)}  ·  ⏳ Waiting ${mono(snap.waiting)}`,
+    ...(snap.problems ? [`⚠️ ${b(snap.problems)} need attention  ${i('/archive retry')}`] : []),
+    `⏳ Items stay in Live for ${mono(`${Math.round(CFG.liveRetentionMs / 3600000)} h`)}  ·  Rescue ${mono(CFG.rescue ? 'on' : 'off')}`,
+    '',
+    i('/archive test  ·  /archive retry  ·  /archive expire  ·  /archive example.com'),
+    ...(ROLES.some((r) => !spaces[r]) ? ['', i('To connect a space: add me as admin to a private channel (Live, Vault) or a group with Topics (Ops). I will ask what it is for.')] : []),
+  ].join('\n');
+}
+
+bot.command('archive', async (ctx) => {
+  if (!isAdmin(ctx)) return denyAdmin(ctx);
+  const [, sub, ...rest] = ctx.message.text.trim().split(/\s+/);
+  const arg = rest.join(' ');
+  if (!sub) return ctx.reply(await archiveStatus());
+  switch (sub.toLowerCase()) {
+    case 'test': {
+      const note = await ctx.reply(`🧪 ${b('Testing the archive…')}  ${i('database, channels, copy and delete, topics')}`);
+      const steps = await archive.selfTest().catch((e) => [{ name: 'Self-test', ok: false, detail: e?.message }]);
+      const bad = steps.filter((s) => !s.ok).length;
+      const text = [
+        `🧪 ${b(bad ? `${bad} of ${steps.length} checks failed` : 'All checks passed')}`,
+        '',
+        ...steps.map((s) => `${s.ok ? '✅' : '❌'} ${esc(s.name)}${s.detail ? `\n    ${i(esc(s.detail))}` : ''}`),
+      ].join('\n');
+      return ctx.telegram.editMessageText(ctx.chat.id, note.message_id, undefined, text).catch(() => ctx.reply(text));
+    }
+    case 'retry': {
+      const n = await archive.retryFailed();
+      return ctx.reply(n ? `🔁 ${b(n)} item${n === 1 ? '' : 's'} queued again.` : `✅ ${i('Nothing to retry.')}`);
+    }
+    case 'expire': {
+      const n = await archive.expireScan();
+      return ctx.reply(n ? `🗄 ${b(n)} item${n === 1 ? '' : 's'} due: moving to the Vault.` : `✅ ${i('Nothing is due yet.')}`);
+    }
+    case 'unset': {
+      const role = (arg || '').toLowerCase();
+      if (!ROLES.includes(role)) return ctx.reply(`${b('Usage')}  ${mono('/archive unset live|vault|ops')}`);
+      await archive.spaces.unset(role);
+      archive.ops.post('admin', `🛡 ${b('Space disconnected')}  ${ROLE_INFO[role].icon} ${ROLE_INFO[role].name}  ${i(`by ${archive.userTag(ctx.from.id)}`)}`);
+      return ctx.reply(`➖ ${ROLE_INFO[role].icon} ${b(ROLE_INFO[role].name)} ${i('disconnected. Nothing was deleted from the chat.')}`);
+    }
+    default: {
+      const found = await archive.search([sub, ...rest].join(' ').replace(/^https?:\/\//, '').split('/')[0], 6).catch(() => []);
+      if (!found.length) return ctx.reply(`🔎 ${i('Nothing archived for that site.')}`);
+      const link = (url, name) => (url ? `<a href="${esc(url)}">${name}</a>` : '');
+      return ctx.reply([
+        `🔎 ${b('Archive')}  ${i(esc([sub, ...rest].join(' ')))}`,
+        '',
+        ...found.map((e) => `${STATE_ICON[e.state] || '•'} ${b(esc(e.host))}  ·  ${new Date(e.createdAt).toISOString().slice(0, 10)}  ·  ${size(e.bytes)}  ${mono(`#id_${e.tag}`)}\n    ${[link(e.liveLink, 'Live'), link(e.vaultLink, 'Vault')].filter(Boolean).join('  ·  ') || i(e.state)}`),
+      ].join('\n'));
+    }
+  }
 });
 
 // a link anywhere in a message: "check out https://x.com/a, it's great" works
@@ -523,7 +701,9 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
   if (neg) {
     cache.rememberUrl(key, parsed.url.href);
     const retry = L.failureActions(neg.code).length > 0;
-    return ctx.reply(retry ? `${neg.message}\n\n${i(L.MSG.retrySoon)}` : neg.message, failureMarkup(L, neg.code, key) ?? undefined);
+    const rescue = await rescueFor(neg.code, key);
+    const lines = [neg.message, ...(rescue ? [L.MSG.rescueNote(L.date(rescue.createdAt))] : []), ...(retry ? [i(L.MSG.retrySoon)] : [])];
+    return ctx.reply(lines.join('\n\n'), failureMarkup(L, neg.code, key, rescue) ?? undefined);
   }
 
   let held = false;
@@ -620,6 +800,7 @@ async function build(ctx, parsed, key, base, opts) {
       metrics.inc('wd_jobs_total', { result: 'ok', mode: data.mode });
       metrics.observe('wd_job_seconds', (Date.now() - started) / 1000);
       log.event('job', { host: parsed.url.host, ok: true, mode: data.mode, ms: Date.now() - started, files: data.files, bytes: data.zipBytes, timings: data.timings });
+      if (Date.now() - started > CFG.slowJobMs) archive.ops.post('logs', `🐢 ${esc(parsed.url.host)}  ·  ${mono(fmtMs(Date.now() - started))}  ·  ${data.files} files  ·  ${size(data.zipBytes)}`);
     } else metrics.inc('wd_cache_total', { kind: 'shared' });
     if (!admin) policy.strikes.clear(uid);
     return true;
@@ -633,15 +814,23 @@ async function build(ctx, parsed, key, base, opts) {
       return false;
     }
     // precise detail stays in the logs and database; the user gets a short human message
-    const text = L.errorText(code);
+    const base = L.errorText(code);
+    const rescue = await rescueFor(code, key);
+    const text = rescue ? `${base}\n\n${L.MSG.rescueNote(L.date(rescue.createdAt))}` : base;
     if (code === 'internal') console.error('job failed:', e);
     else log.event('job', { host: parsed.url.host, ok: false, code, ms: Date.now() - started, detail: e?.message }, 'warn');
     metrics.inc('wd_jobs_total', { result: 'failed', code });
     cache.rememberUrl(key, parsed.url.href); // lets the Try again button find the link
-    update(text, failureMarkup(L, code, key));
-    if (leader && e instanceof UserError) cache.setNegative(key, { message: text, code }, code === 'zip_too_big' ? 6 * 60 * 60 * 1000 : CFG.negTtlMs);
+    update(text, failureMarkup(L, code, key, rescue));
+    if (leader && e instanceof UserError) cache.setNegative(key, { message: base, code }, code === 'zip_too_big' ? 6 * 60 * 60 * 1000 : CFG.negTtlMs);
     await update.flush();
-    if (leader) recordJob(false, code);
+    if (leader) {
+      recordJob(false, code);
+      const who = archive.userTag(uid);
+      const took = fmtMs(Date.now() - started);
+      if (!VISITOR_CODES.has(code)) archive.ops.post('errors', `❗ ${b('Job failed')}  ${mono(code)}\n🌐 ${esc(parsed.url.host)}\n👤 ${who}  ·  ⏱ ${took}\n<pre>${esc(String(e?.message || e).slice(0, 300))}</pre>`);
+      else archive.ops.post('logs', `🟡 ${esc(parsed.url.host)}  ·  ${mono(code)}  ·  ${took}  ·  ${who}`);
+    }
     if (!admin) policy.strikes.fail(uid, code);
     db.record({ ...base, status: 'failed', errorCode: code, durationMs: Date.now() - started });
     return false;
@@ -685,6 +874,12 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
       at: Date.now(), timings: r.timings,
     };
     await Promise.all([cache.setResult(key, data), cache.rememberUrl(key, parsed.url.href), fingerprint.save(key, r.fingerprint)]);
+    // the person already has their file. The archive copies it to Live in the background (same Telegram file, no second upload).
+    archive.record({
+      urlKey: key, host: r.host, title: r.title, url: `${parsed.url.origin}${parsed.url.pathname}`, fileIds: ids, fileName: parts[0].zipName, parts: n,
+      pages: r.pages, files: r.fileCount, bytes: r.zipBytes, mode: r.mode, kind: r.kind,
+      previewFileId: await previews.get(urlKey(parsed.url)).catch(() => null), previewBuffer: r.preview,
+    }).catch(() => {});
     return data;
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
@@ -712,6 +907,11 @@ async function resumeJobs() {
 }
 
 // ---------- telling admins what the bot is doing ----------
+// critical things reach the admins' DMs AND the Ops Alerts topic
+async function alertEverywhere(html) {
+  await notifyAdmins(html);
+  await archive.ops.post('alerts', html);
+}
 async function notifyAdmins(text) {
   if (!CFG.adminNotify) return;
   for (const id of CFG.adminIds) await bot.telegram.sendMessage(id, text).catch(() => {});
@@ -727,7 +927,7 @@ async function announceStartup(warm, resumed, webhookFellBack) {
   try { username = ` @${(await bot.telegram.getMe()).username}`; } catch { /* still online */ }
   const ok = (v) => (v ? '🟢' : '🟡');
   const chromium = ready === null ? '⚪ Chromium off' : `${ok(ready)} Chromium${ready ? (CFG.browserWarm ? '' : ' (on demand)') : ' not ready'}`;
-  await notifyAdmins([
+  const text = ([
     `🟢 ${b(`Website Downloader v${pkg.version}`)} is online${esc(username)}`,
     i(utc(Date.now())),
     '',
@@ -738,6 +938,19 @@ async function announceStartup(warm, resumed, webhookFellBack) {
     '',
     i('Send /ping for live health.'),
   ].join('\n'));
+  await notifyAdmins(text);
+  await archive.ops.post('deploys', text);
+}
+
+// what the daily digest reports: the last 24 hours from the database, plus how the machine is doing right now
+async function digestData() {
+  const fromDb = db.enabled() ? await db.digest24h() : null;
+  const base = fromDb || { jobs: { ok: 0, failed: 0, cached: 0, ours: 0, p50: null, p95: null }, hosts: [], errors: [] };
+  const sc = sharedCache.stats();
+  return {
+    ...base,
+    resources: { memMb: memoryMb(), memShare: memoryShare(), diskMb: diskFreeMb(), sharedHits: sc.enabled ? sc.hits : null, sharedMb: Math.round(sc.approxBytes / 1048576), uptime: fmtUptime(Date.now() - startedAt) },
+  };
 }
 
 // ---------- lifecycle ----------
@@ -749,19 +962,23 @@ async function main() {
   await initStore();
   await db.init();
   db.startRetention();
+  archiveStore.impl = db.enabled() ? new PgStore() : new MemoryStore();
+  if (CFG.archive && !db.enabled()) console.log('Archive: Postgres is off, so archive records are kept in memory only (they are lost on restart)');
   const blockedCount = await policy.loadBlocked();
   if (blockedCount) console.log(`Blocked domains: ${blockedCount}`);
-  setNotifier((text) => notifyAdmins(text));
+  setNotifier((text) => alertEverywhere(text));
   stopHousekeeping = startHousekeeping();
   stopSharedCache = sharedCache.startSharedCache();
 
   // Webhook mode (WEBHOOK_DOMAIN): Telegram delivers updates to this service, so a deploy never drops messages.
   // Without it the bot long-polls, which is simplest but leaves a gap while a new version starts.
+  const me = await bot.telegram.getMe(); // also proves the token works
+  bot.botInfo = me;
+  botIdValue = me.id;
   let hook = null;
   if (CFG.webhookDomain && CFG.healthEnabled && CFG.healthPort) {
     const id = crypto.createHash('sha256').update(CFG.token).digest('hex');
     hook = { path: `/tg/${id.slice(0, 24)}`, secret: id.slice(24, 56) };
-    bot.botInfo = await bot.telegram.getMe();
     hook.handler = bot.webhookCallback(hook.path, { secretToken: hook.secret });
   }
   stopHttp = startHealth(
@@ -787,6 +1004,7 @@ async function main() {
   const adminCommands = [
     ...commands,
     { command: 'ping', description: 'Admin: is it alive? uptime and speed' },
+    { command: 'archive', description: 'Admin: archive status, test and search' },
     { command: 'stats', description: 'Admin: usage, speed and errors' },
     { command: 'ban', description: 'Admin: /ban <telegram_id>' },
     { command: 'unban', description: 'Admin: /unban <telegram_id>' },
@@ -805,7 +1023,7 @@ async function main() {
     try {
       await webhookReachable(`https://${CFG.webhookDomain}/health`);
       await bot.telegram.setWebhook(`https://${CFG.webhookDomain}${hook.path}`, {
-        secret_token: hook.secret, allowed_updates: ['message', 'callback_query'], max_connections: 40,
+        secret_token: hook.secret, allowed_updates: ['message', 'callback_query', 'my_chat_member'], max_connections: 40,
       });
       mode = 'webhook'; // pending updates are kept: nothing sent during a deploy is lost
     } catch (e) {
@@ -815,9 +1033,11 @@ async function main() {
   }
   if (mode !== 'webhook') {
     await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-    bot.launch({ dropPendingUpdates: true }).catch((e) => { console.error(e); process.exit(1); });
+    bot.launch({ dropPendingUpdates: true, allowedUpdates: ['message', 'callback_query', 'my_chat_member'] }).catch((e) => { console.error(e); process.exit(1); });
   }
   console.log(`Website Downloader is running (${mode}).`);
+  archive.start({ digestProvider: digestData }); // also delivers the Ops posts, so it always runs
+  archive.ops.ensureTopics().catch((e) => console.warn('[archive] Ops topics:', e?.message));
   const resumed = await resumeJobs().catch((e) => { console.error('resume error:', e?.message); return 0; });
   announceStartup(warm, resumed, webhookFellBack).catch((e) => console.warn('startup notice failed:', e?.message));
 }
@@ -845,6 +1065,7 @@ function metricGauges() {
     wd_queue_throttled_total: queue.throttled, wd_uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
     wd_memory_rss_mb: memoryMb(), wd_container_memory_ratio: memoryShare(), wd_disk_free_mb: diskFreeMb(),
     wd_browser_up: br.up ? 1 : 0, wd_browser_active: br.active, wd_browser_crashes_total: br.crashes,
+    wd_archive_live: archive.snapshot().live, wd_archive_vaulted: archive.snapshot().vaulted, wd_archive_waiting: archive.snapshot().waiting, wd_archive_problems: archive.snapshot().problems,
     wd_shared_cache_hits_total: sc.hits, wd_shared_cache_misses_total: sc.misses, wd_shared_cache_mb: Math.round(sc.approxBytes / 1048576),
   };
 }
@@ -854,7 +1075,9 @@ async function shutdown(sig) {
   stopping = true;
   setTimeout(() => process.exit(0), CFG.drainMs + 3000).unref();
   // tell admins before going quiet (deploys send SIGTERM); jobs in flight are picked up again by the next start
-  await Promise.race([notifyAdmins(`🔴 ${b(`Website Downloader v${pkg.version} is shutting down`)}\n${i(`${sig} after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`)}`), sleepMs(3000)]);
+  const bye = `🔴 ${b(`Website Downloader v${pkg.version} is shutting down`)}\n${i(`${sig} after ${fmtUptime(Date.now() - startedAt)}. Unfinished jobs resume on the next start.`)}`;
+  archive.stop();
+  await Promise.race([Promise.allSettled([notifyAdmins(bye), archive.ops.send('deploys', bye)]), sleepMs(3000)]);
   stopHttp?.();                                    // no new webhook calls: Telegram retries them on the new instance
   try { bot.stop(sig); } catch { /* not started, or webhook mode */ }
   // drain: running jobs get a short window to finish and deliver; whatever is left resumes after the restart

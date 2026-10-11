@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.8.1
+# Website Downloader (@WebsiteDownloaderBot) v1.9.0
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -138,6 +138,23 @@ Keeps a small instance from running out of room.
 | `MEM_ADMIT_RATIO` | `0.92` | An extra parallel job waits while the container is above this share of memory. |
 | `DISK_MIN_MB` | `700` | An extra parallel job waits while the temp disk has less free space than this. 0 = off. |
 
+#### Archive and Ops channels
+
+Three private spaces: Live (current items), Vault (cold storage) and Ops (alerts, errors, digest, logs). Add the bot as admin and it asks you which is which, so the IDs below are optional.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ARCHIVE` | `true` | Master switch for the archive. false = nothing is posted to Live or the Vault (Ops still works). |
+| `LIVE_CHANNEL_ID` | *(blank)* | Optional: chat id of the Live channel (like -1001234567890). Blank = assign it with the buttons the bot sends you. |
+| `VAULT_CHANNEL_ID` | *(blank)* | Optional: chat id of the Vault channel. Blank = assign it with the buttons. |
+| `OPS_CHAT_ID` | *(blank)* | Optional: chat id of the Ops forum group (Topics turned on). Blank = assign it with the buttons. |
+| `LIVE_RETENTION_HOURS` | `168` | How long an item stays in Live before it is copied to the Vault and cleared (168 = 7 days). |
+| `ARCHIVE_RATE_PER_MIN` | `15` | Posts per minute into one channel. Telegram allows about 20. |
+| `RESCUE` | `true` | When a site is down, blocked or gone, offer the last archived copy. |
+| `OPS_DIGEST` | `true` | Post one daily summary to the Ops group. |
+| `DIGEST_HOUR_UTC` | `6` | Hour of day (UTC, 0-23) after which the daily digest is posted. |
+| `SLOW_JOB_SEC` | `120` | Jobs slower than this many seconds are noted in the Ops logs. |
+
 #### Restarts, deploys and big files
 
 Resume, webhook mode and the self-hosted Bot API.
@@ -214,6 +231,57 @@ Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unbl
 - **Memory:** Chromium starts on demand and closes after `BROWSER_IDLE_MIN` idle minutes. Extra parallel jobs wait while memory is above `MEM_ADMIT_RATIO` or free disk is under `DISK_MIN_MB`.
 - **Observability:** `/ping` (live health), `/stats`, `GET /metrics` (Prometheus text, set `METRICS_TOKEN`), and one structured log line per job (`LOG_FORMAT=json`).
 
+## Archive and Ops (three private spaces)
+Every successful build is also kept in a private **Live** channel, moved to a private **Vault** channel when its time is up, and reported in a private **Ops** group. When a site later disappears, people are offered the last archived copy.
+
+```
+build delivered ──▶ Live channel   preview? + ZIP, labelled and searchable   (same Telegram file: no second upload)
+LIVE_RETENTION_HOURS later ──▶ copied to the Vault ──▶ links saved ──▶ only then cleared from Live
+site down / blocked / gone ──▶ "📦 Saved copy · Oct 3" button ──▶ the archived ZIP is sent back
+```
+
+**Set up (about five minutes)**
+1. Create two **private channels** (Live, Vault) and one **private group** (Ops). In the Ops group turn on **Topics** (Edit -> Topics; choose the **List** layout, it shows each topic's latest message).
+2. Add the bot as **admin** to each: Live needs *post, edit and delete messages*; Vault needs *post messages*; Ops needs *manage topics*. Give it nothing else.
+3. The bot messages every admin (`ADMIN_IDS`) with buttons: **Live / Vault / Ops**. Tap the right one per chat. It checks rights and kind, says exactly what is missing, and connects the space (Ops gets its six topics automatically).
+4. Send `/archive test`: it writes to the database, posts to and deletes from each channel, copies Live -> Vault, creates the topics and posts to Ops, then reports each step. All green means it works in your setup.
+Prefer variables? `LIVE_CHANNEL_ID`, `VAULT_CHANNEL_ID`, `OPS_CHAT_ID` override the buttons.
+
+**What a Live post looks like**
+```
+📦 example.com
+Page title
+🗓 Oct 10, 2026 · 21:03 UTC
+📄 12 pages · 🗂 80 files · 💾 5.0 MB
+⏳ Live until Oct 17
+
+#example_com #2026_10 #id_a3f9c2 #site
+```
+With a preview picture the picture carries this label and the ZIP is a reply to it; without one the first ZIP carries it. Several ZIPs: *Part 2 of 3* as replies. Tags make everything searchable inside Telegram (`#example_com`, `#2026_10`, `#id_...`, `#dynamic`, `#files`). A **preview picture** is added only when one already exists (the browser rendered the page anyway, or someone asked for a preview): the archive never starts a browser just for a picture.
+
+**Lifecycle and safety**
+- Everything goes through a durable **outbox** (Postgres): restarts lose nothing, failures retry with backoff, Telegram's 429 "wait N seconds" is honoured, and posting can never delay or break someone's download. Posts are paced to `ARCHIVE_RATE_PER_MIN` per channel.
+- **Order is the safety:** at expiry the Vault copy and its links are saved *before* anything is deleted from Live. If the Vault copy fails, the Live post stays and Ops alerts you (`/archive retry` after fixing the cause). A Live post deleted by hand is rebuilt in the Vault from the saved files.
+- Items **stay in the Vault forever**; the bot keeps their links (no user data) so `/archive example.com` can find them and rescue can use them.
+- **Rescue:** when a site is not found, down, blocked, timing out and so on, the person gets *"I have a saved copy from Oct 3"* with a button. If the Telegram file reference has expired, the ZIP is copied straight from the Live or Vault post.
+- **Privacy:** posts and the stored records contain no user id, name or username, and the tables have no user column, so *Delete all my data* never touches the archive. Ops shows only a short hashed tag (`user #a3f9`) that cannot be turned back into an id.
+- Without Postgres the archive still works but keeps its records in memory only (lost on restart); `/archive` says so.
+
+**Ops topics**
+| Topic | What lands there | Notifies |
+|---|---|---|
+| 🚨 Alerts | things that need you (error-rate spikes, Chromium cannot start, archive failures, bot removed from a space) | yes |
+| ❗ Errors | jobs that failed for *our* reasons, with details | yes |
+| 🚀 Deploys | online and shutdown notices | yes |
+| 📊 Daily digest | one summary a day after `DIGEST_HOUR_UTC` (jobs, real success, top sites and failures, archive, resources) | quiet |
+| 📜 Logs | one-liners: visitor failures, slow jobs, rescues, items moved to the Vault | quiet |
+| 🛡 Admin actions | bans, blocks, space changes | quiet |
+A topic deleted by hand is created again on the next post.
+
+**Commands (admins):** `/archive` (status), `/archive test`, `/archive example.com` (find, with links), `/archive retry`, `/archive expire`, `/archive unset live|vault|ops`.
+
+**Risks to know about:** Telegram may remove channels that host copied sites, so the Vault is separate from Live and Ops; the bot cannot read channel history, it only knows the links it stored; and because posts stay in the Vault, copyright and takedown requests are yours to handle.
+
 ## Zero-downtime deploys (webhook mode)
 By default the bot long-polls, which leaves a short gap while a new version starts. To remove it:
 1. Give the bot service a public domain on Railway (Settings -> Networking -> Generate Domain) and make sure it listens on `$PORT` (it does).
@@ -234,7 +302,8 @@ Defaults adapt automatically: 1.5 GB ZIP parts, 150 MB single files, 1.2 GB per 
 npm install
 npx playwright install chromium
 BOT_TOKEN=xxx npm start      # or put BOT_TOKEN in .env and run: npm run dev
-npm test
+npm test            # 60 unit and lifecycle tests, no network needed
+npm run test:bot   # runs the real bot against a simulated Telegram (Node 22.3+)
 ```
 
 ## Admins

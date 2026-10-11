@@ -11,6 +11,10 @@ const numZ = (k, d) => {
 };
 // with a self-hosted Telegram Bot API server the 50 MB upload cap becomes 2 GB: bigger parts, fewer ZIPs
 const BIG_API = !!process.env.TELEGRAM_API_URL;
+// a Telegram chat id such as -1001234567890 (0 = not set)
+const chatId = (k) => { const v = Number(process.env[k]); return Number.isFinite(v) && v !== 0 ? v : 0; };
+// an hour of the day, 0-23 (0 is valid)
+const hour = (k, d) => { const raw = process.env[k]; const v = raw === undefined || raw === '' ? NaN : Number(raw); return Number.isInteger(v) && v >= 0 && v <= 23 ? v : d; };
 const list = (k) => (process.env[k] || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 export const MB = 1024 * 1024;
 export const mb = (n) => (n / MB).toFixed(1);
@@ -81,6 +85,17 @@ export const CFG = {
   telegramApiRoot: process.env.TELEGRAM_API_URL || '',        // self-hosted Telegram Bot API server (lifts the 50 MB limit)
   webhookDomain: (process.env.WEBHOOK_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, ''), // public host of this service; set it to receive updates by webhook (zero-downtime deploys)
   drainMs: num('DRAIN_SECONDS', 8) * 1000,                    // on shutdown, wait this long for running jobs before exiting
+  // archive (Live / Vault channels) and Ops
+  archive: process.env.ARCHIVE !== 'false',
+  liveRetentionMs: num('LIVE_RETENTION_HOURS', 168) * 60 * 60 * 1000,   // how long an item stays in Live before it moves to the Vault
+  archiveRatePerMin: num('ARCHIVE_RATE_PER_MIN', 15),                    // posts per minute into one channel (Telegram allows about 20)
+  liveChatId: chatId('LIVE_CHANNEL_ID'),
+  vaultChatId: chatId('VAULT_CHANNEL_ID'),
+  opsChatId: chatId('OPS_CHAT_ID'),
+  rescue: process.env.RESCUE !== 'false',                                // offer the last archived copy when a site is gone
+  digestEnabled: process.env.OPS_DIGEST !== 'false',
+  digestHour: hour('DIGEST_HOUR_UTC', 6),
+  slowJobMs: num('SLOW_JOB_SEC', 120) * 1000,                            // jobs slower than this are noted in Ops
   adminNotify: process.env.ADMIN_NOTIFY !== 'false',        // DM admins on every start and shutdown
   healthPort: Number(process.env.PORT || process.env.HEALTH_PORT || 0) || 0,
   healthEnabled: process.env.HEALTH !== 'false',

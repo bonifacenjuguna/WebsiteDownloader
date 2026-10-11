@@ -26,7 +26,7 @@ function variablesReadByCode() {
   for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.js'))) {
     const src = fs.readFileSync(path.join(dir, f), 'utf8');
     for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]+)/g)) found.add(m[1]);
-    for (const m of src.matchAll(/\b(?:num|numZ|list)\('([A-Z][A-Z0-9_]+)'/g)) found.add(m[1]);
+    for (const m of src.matchAll(/\b(?:num|numZ|list|chatId|hour)\('([A-Z][A-Z0-9_]+)'/g)) found.add(m[1]);
   }
   return found;
 }

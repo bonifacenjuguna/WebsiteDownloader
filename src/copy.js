@@ -64,6 +64,7 @@ const EN = {
     cancel: '✖ Cancel',
     preview: '🖼 Preview',
     fresh: '🔄 Fresh copy',
+    rescue: (date) => `📦 Saved copy · ${date}`,
     retry: '🔁 Try again',
     clearAll: '🗑 Clear history',
     yesClear: 'Yes, clear it',
@@ -100,7 +101,7 @@ const EN = {
     mAgo: (m) => `${m}m ago`,
     hAgo: (h) => `${h}h ago`,
     dAgo: (d) => `${d}d ago`,
-    footer: (kind, ago) => `⚡ ${{ history: 'From your history', unchanged: 'Still up to date', cache: 'Instant copy' }[kind] || 'Instant copy'} · saved ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'From your history', unchanged: 'Still up to date', cache: 'Instant copy', rescue: 'Archived copy' }[kind] || 'Instant copy'} · saved ${ago}`,
   },
 
   // ---- errors: backend code -> human text
@@ -150,6 +151,8 @@ const EN = {
     noLink: `I couldn't find a website address in that message. Send a link like ${code('example.com')}`,
     unchanged: "✅ Nothing has changed on this site since I saved it, so here's the same copy.",
     cancelNone: 'That job has already finished.',
+    rescueNote: (date) => `📦 I have a saved copy from ${b(date)}.`,
+    rescueGone: 'That saved copy is no longer available.',
     restartLost: (host) => `⚠️ I was restarted while saving ${b(esc(host))} and couldn't finish. Please send the link again.`,
     cancelOthers: "Others asked for this site too, so I'll finish it.",
     // history
@@ -219,6 +222,7 @@ export function tr(lang = 'en') {
     const h = Math.floor(m / 60);
     return h < 48 ? L.CAP.hAgo(h) : L.CAP.dAgo(Math.floor(h / 24));
   };
+  L.date = (ms) => new Intl.DateTimeFormat(code, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(ms);
   L.previewCaption = (host) => `🖼 ${b(esc(host))}\n${i(loc.previewLine || 'Live preview of the page as it is right now.')}`;
   // buttons under a result: only what makes sense (a fresh copy only for a saved copy)
   L.actionsFor = ({ refresh = false } = {}) => [...(refresh ? [{ text: L.BTN.fresh, cb: 'r' }] : []), { text: L.BTN.preview, cb: 'p' }];
@@ -252,17 +256,19 @@ export function renderCaption(L, stored) {
   const s = parseSummary(stored);
   if (!s) return String(stored || ''); // captions saved by older versions are plain text
   const dot = '  ·  ';
-  const lines = [`✅ ${b(esc(s.host))}`];
+  // lengths are bounded by construction (never by cutting finished HTML, which could split a tag)
+  const cut = (t, n) => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1).trimEnd()}…` : x; };
+  const lines = [`✅ ${b(esc(cut(s.host, 120)))}`];
   if (s.kind === 'listing') {
-    lines.push(`📂 ${code(s.title)}`, '', `📄 ${L.CAP.files(s.files)}${dot}🗂 ${L.CAP.folders(s.dirs)}${dot}💾 ${size(s.bytes)}`);
+    lines.push(`📂 ${code(cut(s.title, 200))}`, '', `📄 ${L.CAP.files(s.files)}${dot}🗂 ${L.CAP.folders(s.dirs)}${dot}💾 ${size(s.bytes)}`);
   } else {
-    if (s.title) lines.push(esc(s.title));
+    if (s.title) lines.push(esc(cut(s.title, 200)));
     const assets = Math.max(0, s.files - s.pages);
     lines.push('', `📄 ${L.CAP.pages(s.pages)}${dot}🗂 ${L.CAP.files(assets)}${dot}💾 ${size(s.bytes)}`);
   }
   const note = NOTE_ORDER.map((c) => s.notes.find((n) => n.c === c)).find(Boolean);
   if (note && L.NOTE[note.c]) lines.push('', i(L.NOTE[note.c](note.n)));
-  return lines.join('\n').slice(0, 900);
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------- errors
@@ -270,5 +276,8 @@ export const codeOf = (e) => (e instanceof UserError ? e.code : e?.message === '
 
 // worth offering "Try again" (the problem may be temporary)
 export const RETRY_CODES = new Set(['timeout', 'refused', 'reset', 'network', 'server_error', 'rate_limited', 'http_error', 'redirects', 'queue_full', 'send_failed']);
+
+// a saved copy is worth offering when the live site could not be saved (not for typos, private addresses or our own busy signal)
+export const RESCUE_CODES = new Set(['dns', 'not_found', 'forbidden', 'auth', 'cloudflare', 'bot_blocked', 'geo_blocked', 'rate_limited', 'server_error', 'http_error', 'timeout', 'refused', 'reset', 'ssl', 'redirects', 'network', 'internal', 'send_failed']);
 
 export const ENGLISH = EN; // for tests

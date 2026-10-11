@@ -31,6 +31,7 @@ export default {
     cancelled: '🛑 Cancelado.',
   },
   BTN: {
+    rescue: (date) => `📦 Copia guardada · ${date}`,
     cancel: '✖ Cancelar', preview: '🖼 Vista previa', fresh: '🔄 Copia nueva', retry: '🔁 Reintentar',
     clearAll: '🗑 Borrar historial', yesClear: 'Sí, borrar', keep: 'Conservar',
     deleteData: '🗑 Borrar todos mis datos', yesDelete: 'Sí, borrar todo', help: '📖 Ayuda', back: '◀ Atrás',
@@ -48,7 +49,7 @@ export default {
     part: (i, n) => `📦 Parte ${i} de ${n}`,
     partsHint: (n) => `📦 Enviado en ${n} ZIP. Descomprímelos todos en una carpeta y abre index.html.`,
     justNow: 'ahora mismo', mAgo: (m) => `hace ${m} min`, hAgo: (h) => `hace ${h} h`, dAgo: (d) => `hace ${d} d`,
-    footer: (kind, ago) => `⚡ ${{ history: 'De tu historial', unchanged: 'Sigue actualizado', cache: 'Copia instantánea' }[kind] || 'Copia instantánea'} · guardado ${ago}`,
+    footer: (kind, ago) => `⚡ ${{ history: 'De tu historial', unchanged: 'Sigue actualizado', cache: 'Copia instantánea', rescue: 'Copia archivada' }[kind] || 'Copia instantánea'} · guardado ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Eso no parece una dirección web. Prueba con algo como example.com',
@@ -64,6 +65,8 @@ export default {
     internal: '❌ Algo salió mal. Inténtalo de nuevo.',
   },
   MSG: {
+    rescueNote: (date) => `📦 Tengo una copia guardada del <b>${date}</b>.`,
+    rescueGone: 'Esa copia guardada ya no está disponible.',
     busy: '⏳ Tu última descarga sigue en curso. Te la enviaré en cuanto esté lista.',
     cooldown: (s) => `⏳ Dame un momento. Podrás enviar el siguiente enlace en ${s} s.`,
     daily: (n) => `📅 Alcanzaste el límite de hoy: ${n} descargas nuevas. Se reinicia a medianoche UTC. Los sitios ya guardados y las vistas previas siguen funcionando.`,
