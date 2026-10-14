@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.10.0 - Always the latest, with no buttons, and exact mirrors
+The principle: people send a link and get the newest ZIP; the backend makes every decision.
+
+**Check before send (replaces the 24-hour cache)**
+- A saved copy is sent as it is only while it was verified within `RECHECK_AFTER` (default `10m`; `30m`, `2h`, `1d`, `7d`, `0` = every time). Older copies, and copies the same person asks for again, are **checked with the site first**.
+- Unchanged: the same ZIP at once ("✅ Checked just now, nothing changed"). Changed: **rebuilt silently, and free**: it costs no quota. Couldn't check: the saved copy with an honest footer; asked again, it is rebuilt.
+- The check compares what pages *say* (visible text, CSS and JS file names, ignoring clocks, tokens and cache-busting), uses `304`/ETags, and reads sitemap `lastmod` dates. Bounded by `RECHECK_TIMEOUT` (6 s). Never reports a partial check as "unchanged".
+- Copies that can never be verified (browser-rendered sites) are rebuilt after 6 hours instead of being served for days. `CACHE_TTL_MIN` is gone (replaced by `RECHECK_AFTER`); `STALE_MAX_DAYS` is how long copies are kept.
+
+**No buttons for people**
+- No Fresh copy, Preview, Try again or Saved copy buttons. Under a result there is nothing to press. Admins get **Force rebuild / Details / Preview** (Details: age, last check and verdict, mode, timings, archive links). Buttons on old messages keep working (for a person, an old Fresh copy simply makes a normal request).
+- **Quiet retries:** timeouts, 5xx and rate limits are retried twice (`RETRY_DELAY_SEC`, then twice as long) inside the same job before anyone is told. Free of quota.
+- **Automatic rescue:** when the site is down, blocked or gone the person is simply sent the last saved copy (cache first, then the archive) with one plain line. Failures that are the site's fault (dead, slow) go to the quiet Ops Logs, not the loud Errors topic.
+- `/preview` is a command only and always fresh (the screenshot cache is gone).
+- Cancel stays.
+
+**Exact mirrors (nothing lossy by default)**
+- Lossy image shrinking is **off** (`IMAGE_COMPRESS=false`). Instead: identical binary files are stored once; PNG and JPEG are re-packed **losslessly** with every result verified pixel by pixel (anything that differs or saves under 3% is dropped; animated and 16-bit PNGs, and anything unverifiable, are never touched). JPEG uses `jpegtran` (added to the Docker image). Source code and videos are untouched.
+- ZIP parts are filled with the **real compressed sizes** (text is measured by deflating it) up to `PART_MB` (now 48), so some sites need fewer parts.
+- Left-out media keeps its live address (verified in the code and documented); **embedded players (iframes) now get complete addresses**, so `//player.vimeo.com/...` and relative embeds work from a folder.
+- **Sign-in pages:** pages that redirect to a sign-in page now get that page saved once in their place, and links to them open it.
+
+**Fixed**
+- Failed jobs were being written to the database with the error text in place of the job record (a shadowed variable): they are recorded properly again.
+- Cache outcomes (fresh, checked, changed, couldn't check, rescued) and quiet retries are counted in `/metrics` and shown in `/stats`.
+
+**Tests:** 82 unit tests (the freshness rules, duration parsing, the change-check engine against mocked websites, lossless-optimizer safety rules, de-duplication, real sizes, sign-in pages, iframes) and 28 end-to-end checks of the real bot.
+
 ## 1.9.1 - Connect spaces the native Telegram way
 - **Telegram's own chat picker.** `/archive setup` (also shown under `/archive` when something is missing) gives one button per space. Tapping it opens Telegram's native list of the private channels or groups you administer (Ops: groups with Topics on); the chosen chat comes straight back to the bot. No ids, and it works for chats where the bot was added long ago, which the old "I was just added" message could not (that message only appears at the moment the bot becomes admin, so it was missed if the bot was added before this version ran).
 - If the bot is not in the chosen chat, Telegram adds it as admin with exactly the rights needed (Live: post, edit, delete; Vault: post; Ops: manage topics). Two **add-me links** do the same with the rights pre-ticked.

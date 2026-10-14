@@ -99,6 +99,7 @@ export const closeStore = () => kv.close();
 
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
+const keepMs = () => CFG.staleMaxDays * 24 * 60 * 60 * 1000;
 const rowToResult = (row) => ({
   urlKey: row.url_key, fileId: row.tg_file_id, fileName: row.file_name, caption: row.caption || `✅ ${row.host}`,
   host: row.host, title: row.title, mode: row.mode, files: row.files, zipBytes: Number(row.zip_bytes || 0),
@@ -106,23 +107,26 @@ const rowToResult = (row) => ({
 });
 
 export const cache = {
-  // hot layer: Redis. durable layer: Postgres (survives a Redis flush)
+  // A saved result is kept for STALE_MAX_DAYS. Whether it is sent as it is, checked with the site first, or rebuilt is
+  // decided by recheck.js from its age. hot layer: Redis; durable layer: Postgres (survives a Redis flush).
   async getResult(key) {
     const hot = parse(await kv.get(`res:${key}`));
     if (hot) return hot;
-    const row = await db.findFresh(key, CFG.cacheTtlMs / 1000);
+    const row = await db.findFresh(key, CFG.staleMaxDays * 86400);
     if (!row) return null;
     const data = rowToResult(row);
-    const left = data.at + CFG.cacheTtlMs - Date.now();
+    const left = data.at + keepMs() - Date.now();
     if (left > 0) await kv.set(`res:${key}`, JSON.stringify(data), left);
     return data;
   },
-  // Older than the freshness window but still inside STALE_MAX_DAYS: not sent blindly, but worth re-checking with the site
-  async getStale(key) {
-    const row = await db.findFresh(key, CFG.staleMaxDays * 86400);
-    return row ? rowToResult(row) : null;
+  setResult: (key, data) => kv.set(`res:${key}`, JSON.stringify(data), keepMs()),
+  // "I just checked and nothing changed": the copy counts as fresh again for RECHECK_AFTER
+  async touch(key, data) {
+    const next = { ...data, checkedAt: Date.now() };
+    const left = next.at + keepMs() - Date.now();
+    if (left > 0) await kv.set(`res:${key}`, JSON.stringify(next), left);
+    return next;
   },
-  setResult: (key, data) => kv.set(`res:${key}`, JSON.stringify(data), CFG.cacheTtlMs),
   dropResult: (key) => kv.del(`res:${key}`),
   async getNegative(key) { return parse(await kv.get(`neg:${key}`)); },
   setNegative: (key, err, ttlMs = CFG.negTtlMs) => kv.set(`neg:${key}`, JSON.stringify(err), ttlMs),
@@ -140,9 +144,13 @@ export const limits = {
   },
 };
 
+// "this person was just given this site": asking for it again soon means "I want it fresh", so it is checked at once
+export const recent = {
+  mark: (uid, key) => kv.set(`last:${uid}:${key}`, '1', Math.min(6 * 60 * 60 * 1000, Math.max(10 * 60 * 1000, CFG.recheckAfterMs))),
+  async has(uid, key) { return !!(await kv.get(`last:${uid}:${key}`)); },
+};
+// previews are always taken fresh now; only the per-person pause between them is kept
 export const previews = {
-  get: (key) => kv.get(`prev:${key}`),
-  set: (key, fileId) => kv.set(`prev:${key}`, fileId, CFG.cacheTtlMs),
   cooldownOk: (uid) => kv.setNx(`pcd:${uid}`, '1', 10_000),
 };
 

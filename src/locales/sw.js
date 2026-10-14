@@ -28,6 +28,7 @@ export default {
     preview: '🖼 Ninachukua muonekano wa ukurasa…',
     resuming: '🔄 Nilizimwa na kuwashwa upya. Ninaendelea nilipoishia…',
     cancelling: '🛑 Ninaghairi…',
+    changes: '🔎 Ninakagua masasisho…',
     cancelled: '🛑 Imeghairiwa.',
   },
   BTN: {
@@ -37,6 +38,7 @@ export default {
     deleteData: '🗑 Futa data yangu yote', yesDelete: 'Ndiyo, futa yote', help: '📖 Msaada', back: '◀ Rudi',
   },
   NOTE: {
+    loginPages: (n) => `🔐 Kurasa ${n} zinahitaji kuingia, kwa hiyo ukurasa wa kuingia umehifadhiwa badala yake.`,
     signIn: () => '🔐 Ukurasa huu unahitaji kuingia, kwa hiyo ni ukurasa wa umma tu uliohifadhiwa.',
     slow: () => '⏱️ Tovuti hii ilijibu polepole, kwa hiyo baadhi ya faili zinaweza kukosekana.',
     browserFallback: () => '💡 Maudhui yanayobadilika yanaweza kukosekana kwenye nakala hii.',
@@ -49,7 +51,7 @@ export default {
     part: (i, n) => `📦 Sehemu ${i} kati ya ${n}`,
     partsHint: (n) => `📦 Imetumwa kama ZIP ${n}. Zifungue zote kwenye folda moja, kisha fungua index.html.`,
     justNow: 'sasa hivi', mAgo: (m) => `dakika ${m} zilizopita`, hAgo: (h) => `saa ${h} zilizopita`, dAgo: (d) => `siku ${d} zilizopita`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Kutoka historia yako', unchanged: 'Bado ni ya kisasa', cache: 'Nakala ya papo hapo', rescue: 'Nakala ya kumbukumbu' }[kind] || 'Nakala ya papo hapo'} · imehifadhiwa ${ago}`,
+    footer: (kind, ago) => `${{ history: '⚡ Kutoka historia yako', unchanged: '✅ Imekaguliwa sasa, hakuna mabadiliko', unverified: '⚠️ Sikuweza kukagua masasisho', cache: '⚡ Nakala ya papo hapo', rescue: '📦 Nakala ya kumbukumbu' }[kind] || '⚡ Nakala ya papo hapo'} · imehifadhiwa ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Hiyo haionekani kama anwani ya tovuti. Jaribu kama example.com',
@@ -66,6 +68,7 @@ export default {
   },
   MSG: {
     rescueNote: (date) => `📦 Nina nakala iliyohifadhiwa ya <b>${date}</b>.`,
+    rescueAuto: (date) => `📦 <b>Tovuti hii haipatikani kwa sasa.</b>\nHii hapa nakala ya hivi karibuni niliyohifadhi, ya <b>${date}</b>.`,
     rescueGone: 'Nakala hiyo iliyohifadhiwa haipatikani tena.',
     busy: '⏳ Upakuaji wako wa mwisho bado unaendelea. Nitakutumia mara tu utakapokuwa tayari.',
     cooldown: (s) => `⏳ Subiri kidogo. Unaweza kutuma kiungo kinachofuata baada ya sekunde ${s}.`,

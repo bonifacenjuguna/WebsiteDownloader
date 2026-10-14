@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.9.1
+# Website Downloader (@WebsiteDownloaderBot) v1.10.0
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -84,7 +84,7 @@ Telegram upload sizes and per-file limits.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PART_MB` | `40` | Target size of each ZIP part (Telegram allows 50 MB; with a self-hosted Bot API the default becomes 1500). |
+| `PART_MB` | `48` | Target size of each ZIP part (Telegram allows 50 MB; with a self-hosted Bot API the default becomes 1500). |
 | `MAX_FILE_MB` | `42` | Largest single file saved (with a self-hosted Bot API the default becomes 150). |
 | `MAX_TOTAL_MB` | `120` | Default size cap for a single job when a caller does not set its own. |
 | `MAX_FILES` | `1500` | Default file-count cap for a single job when a caller does not set its own. |
@@ -102,7 +102,9 @@ Downloads, caching and size budgeting.
 | `HOST_GAP_MS` | `8` | Minimum gap between requests to one host, in ms (grows automatically on 429/503). |
 | `ASSET_STALL_SEC` | `10` | Give up on a file when no data arrives for this many seconds. |
 | `SHARED_CACHE_MB` | `256` | Size of the shared cache for popular library and font files. 0 = off. |
-| `IMAGE_COMPRESS` | `true` | Shrink big images before leaving anything out (needs the optional sharp package). |
+| `LOSSLESS_OPTIMIZE` | `true` | Re-pack PNG and JPEG images without changing a single pixel (each result is verified; anything that differs or saves under 3% is left as it was). Needs the optional sharp package; JPEG also needs jpegtran. |
+| `LOSSLESS_MAX_SEC` | `20` | Most seconds a job spends on lossless image optimizing. |
+| `IMAGE_COMPRESS` | `false` | Lossy: shrink big images to fit when a site is too large. Off by default: copies are exact mirrors. Turn on only if you prefer smaller over exact. |
 | `LINK_CHECK` | `true` | Verify every local link before sending; broken ones point back to the live site. |
 
 #### Caching and history
@@ -111,8 +113,10 @@ How long things are remembered.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CACHE_TTL_MIN` | `1440` | Minutes a saved copy is sent as-is. |
-| `STALE_MAX_DAYS` | `7` | Copies up to this old are re-checked with the site and re-sent when nothing changed. |
+| `RECHECK_AFTER` | `10m` | How long a saved copy counts as fresh. Younger copies are sent as they are; older ones are checked with the site first (unchanged: same ZIP, changed: rebuilt automatically, free). Examples: 10m, 30m, 2h, 1d, 7d. 0 = check every time. |
+| `RECHECK_TIMEOUT` | `6` | Seconds the change check may take before the saved copy is sent with a "couldn't check" note. |
+| `STALE_MAX_DAYS` | `7` | Saved copies are kept this long; an older one is simply rebuilt. |
+| `RETRY_DELAY_SEC` | `4` | Seconds between the two quiet retries of a failing site (the second wait is twice as long). |
 | `NEG_CACHE_SEC` | `300` | Seconds a failure is remembered, so the same dead link is not retried at once. |
 | `RETENTION_DAYS` | `90` | Days history is kept (people can choose 7, 30 or never with /privacy). |
 
@@ -183,7 +187,7 @@ Watching the bot.
 ## Redis vs Postgres
 - **Redis (disposable):** result cache, failure cache, per-user lock and cooldown, daily counters, change fingerprints, jobs in flight (for resume).
 - **Postgres (durable):** users (language, auto-delete choice), download history, Telegram `file_id`s (so a Redis flush doesn't lose the cache), analytics, admin block list.
-- Cached results are shared between users: the bot never sends cookies or credentials, so everyone gets the same public copy. Default freshness is 24 hours (`CACHE_TTL_MIN`); older copies are re-checked and reused when the site did not change.
+- Cached results are shared between users: the bot never sends cookies or credentials, so everyone gets the same public copy. Saved copies are kept for `STALE_MAX_DAYS`; whether one is sent as it is, checked first or rebuilt is decided by the freshness rules below (`RECHECK_AFTER`).
 - Privacy: requested URLs are stored with the user's Telegram ID for `RETENTION_DAYS` (default 90), or for the time the person chose in `/privacy`.
 
 ## How it works
@@ -192,7 +196,7 @@ Watching the bot.
 - **Sitemap-first discovery** on top of link following, shallow pages first.
 - Links are rewritten to relative paths; anything not saved keeps its online URL. `srcset`, lazy-load attributes, CSS `url()`, `@import` and `image-set()` are handled.
 - **Before sending:** big images are recompressed if the site would not fit (optional `sharp`), and every local link is checked against what is really in the ZIPs. `_all-pages.html` lists every saved page.
-- **Fresh copy is incremental:** the site is asked (ETag / Last-Modified / content hash) whether anything changed; if not, the saved copy is returned at once.
+- **Always the latest, decided by the backend** (see *Freshness*): the site is checked before a saved copy is sent; unchanged = the same ZIP at once, changed = rebuilt silently.
 - **Resume:** jobs in flight are kept in Redis; after a deploy or crash they continue instead of leaving a dead progress message.
 - **Politeness:** per-host request spacing that backs off on 429/503.
 - Files over `MAX_FILE_MB` (42), or beyond the ZIP part budget, are skipped and listed in `skipped.txt`.
@@ -204,7 +208,7 @@ Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unbl
 
 - Any message containing a link works. Tracking parameters (`utm_*`, `fbclid`, ...) are removed. With several links the first is saved.
 - `/history`: tap to resend, ✖ to remove one, 🗑 to clear all. `/privacy`: auto-delete (7 days / 30 days / never / default) and delete all your data.
-- `/preview` sends a screenshot of the **live** site (top of page). Every result also has a 🖼 Preview button.
+- `/preview` sends a fresh screenshot of the **live** site (top of page), every time. It is a command only: people get no buttons under results.
 - Every progress message has ✖ Cancel.
 - `/language`: English, Español, Français, Português, Deutsch, Русский, Kiswahili. Default: the person's Telegram language.
 - There is no `/browser` command: browser use is decided automatically.
@@ -228,9 +232,22 @@ Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unbl
 - **Where the time goes:** `/stats` shows median and 95th-percentile times per phase (fetch, browser, map, crawl, assets, build, zip, upload) over 7 days. Tune what is slow.
 - **Downloads** run as one pipeline (stylesheets are expanded as they arrive), 24 files and 8 pages at a time, with an adaptive cap per host (`HOST_MAX_CONCURRENT`) and a stall timeout (`ASSET_STALL_SEC`).
 - **Shared asset cache** (`SHARED_CACHE_MB`): pinned CDN libraries and Google Font files are fetched once and reused by every site. Lives on the temp disk and is optional.
-- **Repeat requests:** copies are re-sent as-is for `CACHE_TTL_MIN` (24 h); older ones (up to `STALE_MAX_DAYS`) are re-checked with the site and re-sent if nothing changed.
+- **Repeat requests:** see *Freshness* below.
 - **Memory:** Chromium starts on demand and closes after `BROWSER_IDLE_MIN` idle minutes. Extra parallel jobs wait while memory is above `MEM_ADMIT_RATIO` or free disk is under `DISK_MIN_MB`.
 - **Observability:** `/ping` (live health), `/stats`, `GET /metrics` (Prometheus text, set `METRICS_TOKEN`), and one structured log line per job (`LOG_FORMAT=json`).
+
+## Freshness, simple for people and smart in the backend
+People send a link and get the newest ZIP. They are never asked to choose anything: no "fresh copy", "preview" or "try again" buttons (admins get **Force rebuild / Details / Preview** under their results).
+- **`RECHECK_AFTER`** (default `10m`; `30m`, `2h`, `1d`, `7d`, ... or `0` = every time): a saved copy verified more recently than this is sent as it is.
+- **Older, or the same person asks again** (asking again soon means "I want it fresh"): the site is checked first, within `RECHECK_TIMEOUT` seconds, with a handful of small requests: the sitemap's last-modified dates, `304 Not Modified` answers and ETags, and a signature of what each page *says* (its visible text and the names of its CSS and JS files, ignoring clocks, tokens and cache-busting noise).
+  - **Unchanged:** the same ZIP at once, footer *"✅ Checked just now, nothing changed"*.
+  - **Changed:** rebuilt silently and sent. A rebuild because the site changed **costs the person no quota**.
+  - **Couldn't check** (slow, unreachable, or a browser-rendered site that cannot be compared): the saved copy with an honest footer *"⚠️ Couldn't check for updates"*; if they ask again, it is rebuilt. Copies that can never be verified are rebuilt after 6 hours or `RECHECK_AFTER`, whichever is longer.
+- **Quiet retries:** a site that times out, answers 5xx or rate-limits is retried twice (`RETRY_DELAY_SEC`, then twice as long) before anyone hears about it. Retries are part of the same job and cost no quota.
+- **Site gone:** the person gets the last saved copy automatically, as described under Rescue.
+- **Exact mirror:** nothing lossy happens to a copy by default. Identical files are stored once; PNG and JPEG are re-packed **losslessly**, and every result is decoded and compared pixel by pixel with the original (anything that differs, or saves under 3%, is dropped; animated and 16-bit PNGs are never touched). JPEG needs `jpegtran` (installed in the Docker image) and everything needs the optional `sharp` package; without them images are simply left as they are. Source code and videos are never touched. `IMAGE_COMPRESS=true` turns the old lossy shrinking back on (admins only, off by default).
+- **Left-out media keeps its live address:** a file too big to include, over the ZIP budget or failed to download stays linked to the original, so the opened copy shows it whenever there is internet (it is listed in `skipped.txt`). Embedded players (YouTube, Vimeo, maps) get complete addresses too. A few things no mirror can fix: hotlink-protected files, signed links that expire, and media a script builds at runtime.
+- **Sign-in pages:** when pages redirect to a sign-in page, that page is saved **once** in their place, and links to the protected pages open it. The bot never signs in.
 
 ## Archive and Ops (three private spaces)
 Every successful build is also kept in a private **Live** channel, moved to a private **Vault** channel when its time is up, and reported in a private **Ops** group. When a site later disappears, people are offered the last archived copy.
@@ -238,7 +255,7 @@ Every successful build is also kept in a private **Live** channel, moved to a pr
 ```
 build delivered ──▶ Live channel   preview? + ZIP, labelled and searchable   (same Telegram file: no second upload)
 LIVE_RETENTION_HOURS later ──▶ copied to the Vault ──▶ links saved ──▶ only then cleared from Live
-site down / blocked / gone ──▶ "📦 Saved copy · Oct 3" button ──▶ the archived ZIP is sent back
+site down / blocked / gone ──▶ the archived ZIP is sent to the person automatically, with one plain line
 ```
 
 **Set up (about five minutes)**
@@ -268,7 +285,7 @@ With a preview picture the picture carries this label and the ZIP is a reply to 
 - Everything goes through a durable **outbox** (Postgres): restarts lose nothing, failures retry with backoff, Telegram's 429 "wait N seconds" is honoured, and posting can never delay or break someone's download. Posts are paced to `ARCHIVE_RATE_PER_MIN` per channel.
 - **Order is the safety:** at expiry the Vault copy and its links are saved *before* anything is deleted from Live. If the Vault copy fails, the Live post stays and Ops alerts you (`/archive retry` after fixing the cause). A Live post deleted by hand is rebuilt in the Vault from the saved files.
 - Items **stay in the Vault forever**; the bot keeps their links (no user data) so `/archive example.com` can find them and rescue can use them.
-- **Rescue:** when a site is not found, down, blocked, timing out and so on, the person gets *"I have a saved copy from Oct 3"* with a button. If the Telegram file reference has expired, the ZIP is copied straight from the Live or Vault post.
+- **Rescue:** when a site is not found, down, blocked, timing out and so on, the person simply receives the last saved copy (from the cache, else the archive) with one plain line: *"This site isn't reachable right now. Here's the latest copy I saved, from Oct 3."* No button to find. If the Telegram file reference has expired, the ZIP is copied straight from the Live or Vault post.
 - **Privacy:** posts and the stored records contain no user id, name or username, and the tables have no user column, so *Delete all my data* never touches the archive. Ops shows only a short hashed tag (`user #a3f9`) that cannot be turned back into an id.
 - Without Postgres the archive still works but keeps its records in memory only (lost on restart); `/archive` says so.
 
@@ -307,7 +324,7 @@ Defaults adapt automatically: 1.5 GB ZIP parts, 150 MB single files, 1.2 GB per 
 npm install
 npx playwright install chromium
 BOT_TOKEN=xxx npm start      # or put BOT_TOKEN in .env and run: npm run dev
-npm test            # 60 unit and lifecycle tests, no network needed
+npm test            # unit and lifecycle tests, no network needed
 npm run test:bot   # runs the real bot against a simulated Telegram (Node 22.3+)
 ```
 
@@ -320,7 +337,7 @@ There is no admin screen. An admin is a Telegram user ID listed in the `ADMIN_ID
 ## Whole-site crawl (the default for every link)
 - `example.com` saves the whole site. `example.com/docs` saves that part of the site only.
 - **Pages:** same host, breadth-first, up to `SITE_MAX_PAGES` (300) and `SITE_DEPTH` (10); sites that build pages with JavaScript are capped at `SITE_MAX_PAGES_BROWSER` (60). Disallowed paths in `robots.txt` are skipped (`SITE_RESPECT_ROBOTS=false` turns that off). Links with `?query` are not followed. Pages that redirect to a sign-in are left out.
-- **ZIP parts:** about `PART_MB` (40) MB each, at most `SITE_MAX_PARTS` (12). Every path is relative to one shared root, so unzipping all parts into the same folder gives a working site. Part 1 holds `index.html`, `README.txt`, `_all-pages.html` and `skipped.txt`. With several parts the bot first sends a summary message, then *Part i of n*.
+- **ZIP parts:** about `PART_MB` (48) MB each, filled using the real compressed sizes, at most `SITE_MAX_PARTS` (12). Every path is relative to one shared root, so unzipping all parts into the same folder gives a working site. Part 1 holds `index.html`, `README.txt`, `_all-pages.html` and `skipped.txt`. With several parts the bot first sends a summary message, then *Part i of n*.
 - **When it does not fit:** images are recompressed first; then code and pages are packed first and the largest videos/images/documents are left out (listed in `skipped.txt`, still loading from the live site online).
 - **Folder listings:** an "Index of" page is detected automatically and downloaded as files (`SITE_MAX_FILES`, `SITE_MAX_DIRS`, `SITE_MAX_TOTAL_MB`), keeping the folder structure.
 - Time limit `SITE_TIMEOUT_SEC` (480). One link counts as one download toward `DAILY_LIMIT`.

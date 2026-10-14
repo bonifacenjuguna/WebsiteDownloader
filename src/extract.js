@@ -183,6 +183,9 @@ export function rewriteHtml($, base, map, { stripScripts = false, from = FROM, p
   });
   retarget('a[href],area[href]', 'href', pageLookup);
   retarget('form[action]', 'action', null);
+  // embedded players and pages (YouTube, Vimeo, maps): complete addresses, because "//player.vimeo.com/x" or "/embed/y"
+  // would be looked for on the computer's disk when the ZIP is opened from a folder
+  retarget('iframe[src],frame[src]', 'src', pageLookup);
 
   // things that break when opened from disk
   $('base').remove();

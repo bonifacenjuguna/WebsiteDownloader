@@ -199,16 +199,26 @@ export function sitemapsFromRobots(text) {
 const unxml = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/<!\[CDATA\[|\]\]>/g, '').trim();
 
 // Handles both <urlset> (pages) and <sitemapindex> (more sitemaps). Regex is enough for this flat format.
+// `lastmod` maps a page URL to the time (ms) the site says it last changed, when it says.
 export function parseSitemapXml(text) {
   const urls = [];
   const maps = [];
+  const lastmod = new Map();
   const t = String(text);
   if (/<sitemapindex[\s>]/i.test(t)) {
     for (const m of t.matchAll(/<sitemap[\s>][\s\S]*?<loc>([\s\S]*?)<\/loc>/gi)) maps.push(unxml(m[1]));
   } else {
-    for (const m of t.matchAll(/<url[\s>][\s\S]*?<loc>([\s\S]*?)<\/loc>/gi)) urls.push(unxml(m[1]));
+    for (const m of t.matchAll(/<url[\s>]([\s\S]*?)<\/url>/gi)) {
+      const loc = /<loc>([\s\S]*?)<\/loc>/i.exec(m[1]);
+      if (!loc) continue;
+      const url = unxml(loc[1]);
+      urls.push(url);
+      const lm = /<lastmod>([\s\S]*?)<\/lastmod>/i.exec(m[1]);
+      const when = lm ? Date.parse(unxml(lm[1])) : NaN;
+      if (Number.isFinite(when)) lastmod.set(url, when);
+    }
   }
-  return { urls, maps };
+  return { urls, maps, lastmod };
 }
 
 // shallow pages first: when a sitemap has thousands of URLs and only some fit, the top of the site matters most

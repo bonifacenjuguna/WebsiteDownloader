@@ -3,7 +3,6 @@
 import { CFG } from './config.js';
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const hours = () => Math.max(1, Math.round(CFG.cacheTtlMs / 3600000));
 const secs = (ms) => Math.round(ms / 1000);
 const mbOf = (b) => Math.round(b / 1048576);
 
@@ -14,9 +13,9 @@ const MENU_TEXT = [
   '🌐 Save websites for offline use',
   '📂 Whole sites with every page, plus open folders',
   '🧠 Handles dynamic sites automatically',
-  '🖼 Preview a live page before downloading',
+  '🖼 Preview a live page with /preview',
   '📜 Revisit (or clear) previous downloads',
-  '🔄 Refresh saved copies when needed',
+  '🔄 Always the latest version, checked for you',
   '',
   'Send a link to begin, or pick a topic below.',
 ].join('\n');
@@ -35,7 +34,7 @@ const TOPICS = [
       '',
       '• Dynamic and protected sites are handled automatically. I pick the best way in.',
       '• Ads and trackers are left out.',
-      `• Asking for the same site again within ${hours()}h is instant.`,
+      '• Asking for a site I already have is instant, and I check it for changes first, so you always get the latest.',
       '',
       'Prefer a command? <code>/download example.com</code>',
     ].join('\n')],
@@ -71,9 +70,8 @@ const TOPICS = [
       'Take a look before you download:',
       '',
       '• <code>/preview example.com</code>',
-      '• or tap <b>🖼 Preview</b> under any result',
       '',
-      'You get a screenshot of the live page as it is right now, not your saved copy.',
+      'You get a fresh screenshot of the live page as it is right now, every time, never your saved copy.',
     ].join('\n')],
   },
   {
@@ -82,9 +80,9 @@ const TOPICS = [
       [
         '<code>/history</code> shows your recent downloads. Tap one to get it again instantly. Tap <b>✖</b> next to one to remove it, or <b>🗑 Clear history</b> to remove them all.',
         '',
-        `Saved copies are kept for ${hours()}h. Ask for a site I already have and it arrives right away, marked <b>⚡ Instant copy</b>. After that, I quickly check the site and, if nothing changed, send the same copy again instead of rebuilding.`,
+        'Every site I save is kept. When you ask for it again I quickly check whether it changed: if not, you get the same ZIP at once; if it did, I rebuild it for you automatically. You never need to ask twice.',
         '',
-        'Want the latest version? Tap <b>🔄 Fresh copy</b> under the file. If nothing changed on the site, you get the same copy back at once.',
+        'You never have to ask for a "fresh" copy. If the site changed, I notice and rebuild it for you. If you ask again right away, I take that as "I want it fresh" and check at once.',
       ].join('\n'),
       [
         '<b>Your data</b>',
@@ -130,10 +128,10 @@ const TOPICS = [
       ].join('\n'),
       [
         '<b>Copy looks off?</b>',
-        '• <b>Empty or unstyled</b>: send the link again with 🔄 Fresh copy. Dynamic sites are retried automatically.',
+        '• <b>Empty or unstyled</b>: send the link again. Asking twice makes me rebuild it, and dynamic sites are handled automatically.',
         '• <b>Menus or buttons do nothing</b>: the site needs its server. Run <code>npx serve</code> in the unzipped folder and open it from there (see README.txt).',
         '• <b>Images missing</b>: they were too large or blocked. They load from the live site when you are online.',
-        '• <b>Not sure it is the right site</b>: use 🖼 Preview first.',
+        '• <b>Not sure it is the right site</b>: use <code>/preview</code> first.',
       ].join('\n'),
     ],
   },

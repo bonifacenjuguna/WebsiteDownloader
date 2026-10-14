@@ -28,6 +28,7 @@ export default {
     preview: '🖼 Vorschau wird erstellt…',
     resuming: '🔄 Ich wurde neu gestartet und mache dort weiter, wo ich war…',
     cancelling: '🛑 Wird abgebrochen…',
+    changes: '🔎 Suche nach Aktualisierungen…',
     cancelled: '🛑 Abgebrochen.',
   },
   BTN: {
@@ -37,6 +38,7 @@ export default {
     deleteData: '🗑 Alle meine Daten löschen', yesDelete: 'Ja, alles löschen', help: '📖 Hilfe', back: '◀ Zurück',
   },
   NOTE: {
+    loginPages: (n) => `🔐 ${n} ${n === 1 ? 'Seite verlangt' : 'Seiten verlangen'} eine Anmeldung, daher ist stattdessen die Anmeldeseite gespeichert.`,
     signIn: () => '🔐 Diese Seite verlangt eine Anmeldung, daher wurde nur die öffentliche Seite gespeichert.',
     slow: () => '⏱️ Diese Website hat langsam geantwortet, deshalb fehlen vielleicht einige Dateien.',
     browserFallback: () => '💡 In dieser Kopie fehlen möglicherweise dynamische Inhalte.',
@@ -49,7 +51,7 @@ export default {
     part: (i, n) => `📦 Teil ${i} von ${n}`,
     partsHint: (n) => `📦 In ${n} ZIPs gesendet. Alle in einen Ordner entpacken, dann index.html öffnen.`,
     justNow: 'gerade eben', mAgo: (m) => `vor ${m} Min.`, hAgo: (h) => `vor ${h} Std.`, dAgo: (d) => `vor ${d} T.`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Aus deinem Verlauf', unchanged: 'Noch aktuell', cache: 'Sofortkopie', rescue: 'Archivierte Kopie' }[kind] || 'Sofortkopie'} · gespeichert ${ago}`,
+    footer: (kind, ago) => `${{ history: '⚡ Aus deinem Verlauf', unchanged: '✅ Gerade geprüft, nichts geändert', unverified: '⚠️ Aktualisierungen konnten nicht geprüft werden', cache: '⚡ Sofortkopie', rescue: '📦 Archivierte Kopie' }[kind] || '⚡ Sofortkopie'} · gespeichert ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Das sieht nicht nach einer Website-Adresse aus. Versuch etwas wie example.com',
@@ -66,6 +68,7 @@ export default {
   },
   MSG: {
     rescueNote: (date) => `📦 Ich habe eine gespeicherte Kopie vom <b>${date}</b>.`,
+    rescueAuto: (date) => `📦 <b>Diese Website ist gerade nicht erreichbar.</b>\nHier ist die letzte Kopie, die ich gespeichert habe, vom <b>${date}</b>.`,
     rescueGone: 'Diese gespeicherte Kopie ist nicht mehr verfügbar.',
     busy: '⏳ Dein letzter Download läuft noch. Ich sende ihn, sobald er fertig ist.',
     cooldown: (s) => `⏳ Einen Moment. Den nächsten Link kannst du in ${s} s senden.`,

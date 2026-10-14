@@ -2,6 +2,7 @@ import { CFG } from './config.js';
 import { UserError, explainNetError } from './errors.js';
 import { safeFetch, readBody, withHost } from './net.js';
 import { decodeBody } from './extract.js';
+import zlib from 'node:zlib';
 
 // First request for the address the user sent. Tries plain http when a bare domain does not answer on https.
 export async function fetchMain(url, explicitScheme, signal) {
@@ -65,4 +66,17 @@ async function fetchHtmlNow(url, { etag, lastModified, signal }) {
   } catch (e) {
     return { fail: e?.message || 'error', status: 0 };
   }
+}
+
+// a small text resource (robots.txt, sitemap.xml); .gz files are unpacked; any failure just returns ''
+export async function fetchText(url, timeoutMs, maxBytes, signal) {
+  try {
+    const { res } = await safeFetch(url, { timeoutMs, signal });
+    if (!res.ok) { res.body?.cancel().catch(() => {}); return ''; }
+    const b = await readBody(res, maxBytes);
+    if (b.tooBig) return '';
+    let buf = b.buf;
+    if (buf[0] === 0x1f && buf[1] === 0x8b) { try { buf = zlib.gunzipSync(buf); } catch { return ''; } }
+    return buf.toString('utf8');
+  } catch { return ''; }
 }

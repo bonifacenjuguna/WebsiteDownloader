@@ -28,6 +28,7 @@ export default {
     preview: '🖼 Capturando una vista previa…',
     resuming: '🔄 Me reinicié. Continúo donde lo dejé…',
     cancelling: '🛑 Cancelando…',
+    changes: '🔎 Buscando actualizaciones…',
     cancelled: '🛑 Cancelado.',
   },
   BTN: {
@@ -37,6 +38,7 @@ export default {
     deleteData: '🗑 Borrar todos mis datos', yesDelete: 'Sí, borrar todo', help: '📖 Ayuda', back: '◀ Atrás',
   },
   NOTE: {
+    loginPages: (n) => `🔐 ${n} ${n === 1 ? 'página requiere' : 'páginas requieren'} iniciar sesión, así que se guardó la página de inicio de sesión en su lugar.`,
     signIn: () => '🔐 Esta página requiere iniciar sesión, así que solo se guardó la página pública.',
     slow: () => '⏱️ Este sitio respondió lento, así que pueden faltar algunos archivos.',
     browserFallback: () => '💡 Puede que falte contenido dinámico en esta copia.',
@@ -49,7 +51,7 @@ export default {
     part: (i, n) => `📦 Parte ${i} de ${n}`,
     partsHint: (n) => `📦 Enviado en ${n} ZIP. Descomprímelos todos en una carpeta y abre index.html.`,
     justNow: 'ahora mismo', mAgo: (m) => `hace ${m} min`, hAgo: (h) => `hace ${h} h`, dAgo: (d) => `hace ${d} d`,
-    footer: (kind, ago) => `⚡ ${{ history: 'De tu historial', unchanged: 'Sigue actualizado', cache: 'Copia instantánea', rescue: 'Copia archivada' }[kind] || 'Copia instantánea'} · guardado ${ago}`,
+    footer: (kind, ago) => `${{ history: '⚡ De tu historial', unchanged: '✅ Comprobado ahora, sin cambios', unverified: '⚠️ No pude buscar actualizaciones', cache: '⚡ Copia instantánea', rescue: '📦 Copia archivada' }[kind] || '⚡ Copia instantánea'} · guardado ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Eso no parece una dirección web. Prueba con algo como example.com',
@@ -66,6 +68,7 @@ export default {
   },
   MSG: {
     rescueNote: (date) => `📦 Tengo una copia guardada del <b>${date}</b>.`,
+    rescueAuto: (date) => `📦 <b>Este sitio no está disponible ahora mismo.</b>\nAquí tienes la última copia que guardé, del <b>${date}</b>.`,
     rescueGone: 'Esa copia guardada ya no está disponible.',
     busy: '⏳ Tu última descarga sigue en curso. Te la enviaré en cuanto esté lista.',
     cooldown: (s) => `⏳ Dame un momento. Podrás enviar el siguiente enlace en ${s} s.`,

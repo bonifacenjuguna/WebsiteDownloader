@@ -15,9 +15,15 @@ const BIG_API = !!process.env.TELEGRAM_API_URL;
 const chatId = (k) => { const v = Number(process.env[k]); return Number.isFinite(v) && v !== 0 ? v : 0; };
 // an hour of the day, 0-23 (0 is valid)
 const hour = (k, d) => { const raw = process.env[k]; const v = raw === undefined || raw === '' ? NaN : Number(raw); return Number.isInteger(v) && v >= 0 && v <= 23 ? v : d; };
+// "10m", "1d"... (see duration.js)
+const duration = (k, d) => parseDuration(process.env[k], d);
 const list = (k) => (process.env[k] || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 export const MB = 1024 * 1024;
 export const mb = (n) => (n / MB).toFixed(1);
+
+import { parseDuration } from './duration.js';
+
+const RECHECK = duration('RECHECK_AFTER', 10 * 60 * 1000);
 
 export const CFG = {
   token: process.env.BOT_TOKEN,
@@ -25,7 +31,7 @@ export const CFG = {
     .split(',').map((s) => s.trim()).filter(Boolean).map(Number),
   enableBrowser: process.env.ENABLE_BROWSER !== 'false',
   maxFileBytes: num('MAX_FILE_MB', BIG_API ? 150 : 42) * MB,   // single files up to 42 MB (Telegram's hard cap is 50 MB; 150 MB is the memory-safe limit with a local Bot API)
-  partBytes: num('PART_MB', BIG_API ? 1500 : 40) * MB,          // target size of each ZIP part sent to Telegram
+  partBytes: num('PART_MB', BIG_API ? 1500 : 48) * MB,          // target size of each ZIP part sent to Telegram
   maxTotalBytes: num('MAX_TOTAL_MB', 120) * MB,
   maxHtmlBytes: 8 * MB,
   maxFiles: num('MAX_FILES', 1500),
@@ -41,8 +47,11 @@ export const CFG = {
   pgSsl: process.env.PGSSL === 'true',
   redisUrl: process.env.REDIS_URL || '',
   adminIds: (process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean).map(Number),
-  cacheTtlMs: num('CACHE_TTL_MIN', 1440) * 60 * 1000,   // a saved copy is sent as-is for this long
-  staleMaxDays: num('STALE_MAX_DAYS', 7),                // older copies are re-checked with the site and reused when nothing changed
+  recheckAfterMs: RECHECK,
+  unverifiableMaxMs: Math.max(RECHECK, 6 * 60 * 60 * 1000),    // a copy that can never be verified (browser-rendered) is rebuilt after this, not kept for days    // a saved copy younger than this is sent as is; an older one is checked with the site first (0 = every time)
+  recheckTimeoutMs: num('RECHECK_TIMEOUT', 6) * 1000,             // the check never takes longer than this
+  staleMaxDays: num('STALE_MAX_DAYS', 7),                         // copies are kept this long; an older one is simply rebuilt
+  retryDelayMs: num('RETRY_DELAY_SEC', 4) * 1000,                 // quiet retries (twice) wait this long, then twice as long
   negTtlMs: num('NEG_CACHE_SEC', 300) * 1000,
   retentionDays: num('RETENTION_DAYS', 90),
   // new (non-cached) downloads per user per UTC day; 0 = unlimited; admins are exempt
@@ -67,7 +76,9 @@ export const CFG = {
   siteSitemap: process.env.SITE_SITEMAP !== 'false',          // read sitemap.xml to find pages faster
   siteSitemapMax: num('SITE_SITEMAP_URLS', 1000),
   hostGapMs: num('HOST_GAP_MS', 8),                          // minimum gap between requests to one host (adapts on 429/503)
-  compressImages: process.env.IMAGE_COMPRESS !== 'false',     // shrink images before leaving them out (needs the optional sharp package)
+  compressImages: process.env.IMAGE_COMPRESS === 'true',     // shrink images before leaving them out (needs the optional sharp package)
+  losslessOptimize: process.env.LOSSLESS_OPTIMIZE !== 'false',      // re-pack images without changing a single pixel
+  losslessMaxMs: num('LOSSLESS_MAX_SEC', 20) * 1000,
   linkCheck: process.env.LINK_CHECK !== 'false',              // verify local links before sending
   resume: process.env.RESUME !== 'false',                     // continue unfinished jobs after a restart (needs Redis)
   resumeMaxAgeMs: num('RESUME_MAX_MIN', 30) * 60 * 1000,

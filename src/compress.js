@@ -21,7 +21,7 @@ const KIND = (f) => {
 export async function compressImages(job, { needBytes, minBytes = 120 * 1024, maxWidth = 2000 } = {}) {
   const sh = await getSharp();
   if (!sh) return { count: 0, saved: 0 };
-  const list = [...job.files.values()].filter((f) => KIND(f) && f.size >= minBytes).sort((a, b) => b.size - a.size);
+  const list = [...job.files.values()].filter((f) => !f.alias && KIND(f) && f.size >= minBytes).sort((a, b) => b.size - a.size);
   let saved = 0;
   let count = 0;
   for (const f of list) {

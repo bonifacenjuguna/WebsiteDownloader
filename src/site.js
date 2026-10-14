@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import * as cheerio from 'cheerio';
 import { CFG, MB, TG_MAX_BYTES, mb } from './config.js';
 import { UserError } from './errors.js';
@@ -12,11 +11,15 @@ import { collectAssets, rewriteCssFiles, fetchAsset, pool } from './assets.js';
 import { rank, estimate } from './trim.js';
 import { renderWithBrowser, browserSem } from './browser.js';
 import { zipEntries } from './zip.js';
-import { fetchMain, fetchHtml } from './fetcher.js';
+import { fetchMain, fetchHtml, fetchText } from './fetcher.js';
 import { tr } from './copy.js';
 import { compressImages } from './compress.js';
+import { optimizeLossless } from './optimize.js';
+import { measureZipSizes } from './measure.js';
+import * as log from './log.js';
 import { checkLinks } from './checks.js';
-import { hashOf } from './fingerprint.js';
+import { signature } from './signature.js';
+import { createSignInTracker } from './signin.js';
 import {
   parseRobots, robotsAllows, pageKey, pageLocal, scopePathOf, pageLinksFromHrefs, sitemapsFromRobots, parseSitemapXml, sortShallowFirst,
   isListingTitle, classifyListingHrefs, listingLocal, packParts, packPrioritized, fileLinksFromHrefs, listingIndexHtml, escapeHtml,
@@ -43,19 +46,6 @@ function skippedText(job) {
   return lines.length ? `${lines.join('\n')}\n` : '';
 }
 
-// a small text resource (robots.txt, sitemap.xml); .gz sitemaps are unpacked; failures just return ''
-async function fetchText(url, timeoutMs, maxBytes, signal) {
-  try {
-    const { res } = await safeFetch(url, { timeoutMs, signal });
-    if (!res.ok) { res.body?.cancel().catch(() => {}); return ''; }
-    const b = await readBody(res, maxBytes);
-    if (b.tooBig) return '';
-    let buf = b.buf;
-    if (buf[0] === 0x1f && buf[1] === 0x8b) { try { buf = zlib.gunzipSync(buf); } catch { return ''; } }
-    return buf.toString('utf8');
-  } catch { return ''; }
-}
-
 // Sitemap-first discovery: the pages a site lists itself, shallow ones first. Link-following still runs on top,
 // so pages missing from the sitemap are found too.
 async function readSitemaps(start, robotsText, scope, signal) {
@@ -65,14 +55,17 @@ async function readSitemaps(start, robotsText, scope, signal) {
   const queue = [...new Set(roots)];
   const seenMaps = new Set(queue);
   const hrefs = [];
+  const used = []; // the sitemaps that listed pages: remembered, so a later check can ask them what changed
   for (let fetched = 0; queue.length && fetched < 8 && hrefs.length < CFG.siteSitemapMax * 3; fetched++) {
-    const text = await fetchText(queue.shift(), 10000, 8 * MB, signal);
+    const smUrl = queue.shift();
+    const text = await fetchText(smUrl, 10000, 8 * MB, signal);
     if (!text) continue;
     const { urls, maps } = parseSitemapXml(text);
+    if (urls.length) used.push(smUrl);
     hrefs.push(...urls);
     for (const m of maps) if (!seenMaps.has(m) && sameHost(m)) { seenMaps.add(m); queue.push(m); }
   }
-  return sortShallowFirst([...pageLinksFromHrefs(hrefs, start.href, scope)]).slice(0, CFG.siteSitemapMax);
+  return { keys: sortShallowFirst([...pageLinksFromHrefs(hrefs, start.href, scope)]).slice(0, CFG.siteSitemapMax), used };
 }
 
 // ---------------------------------------------------------------- entry point
@@ -310,7 +303,8 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   onStatus(S.mapping);
   const robotsText = (CFG.siteRespectRobots || CFG.siteSitemap) ? await fetchText(`${start.origin}/robots.txt`, 8000, 200_000, opts.signal) : '';
   const robots = CFG.siteRespectRobots ? parseRobots(robotsText) : [];
-  const seeds = CFG.siteSitemap ? await readSitemaps(start, robotsText, scope, opts.signal) : [];
+  const sitemap = CFG.siteSitemap ? await readSitemaps(start, robotsText, scope, opts.signal) : { keys: [], used: [] };
+  const seeds = sitemap.keys;
   timings.map = Date.now() - tm;
   job.throwIfCancelled();
 
@@ -348,9 +342,10 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   const pages = new Map(); // key -> { key, base, html, local, rendered, fetchUrl, etag, lastModified, hash }
   pages.set(startKey, {
     key: startKey, base: start.href, html: startHtml, local: pageLocal(startKey), rendered: startRendered,
-    fetchUrl: first.finalUrl, etag: first.headers?.get?.('etag') || null, lastModified: first.headers?.get?.('last-modified') || null, hash: hashOf(html0),
+    fetchUrl: first.finalUrl, etag: first.headers?.get?.('etag') || null, lastModified: first.headers?.get?.('last-modified') || null, hash: signature(html0),
   });
   const seen = new Set([startKey]);
+  const signIn = createSignInTracker();
   const fileLinks = new Set();
   let accepted = 1;
   let loginSkipped = 0;
@@ -383,13 +378,24 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
         const fin = new URL(got.finalUrl);
         if (fin.host !== scope.host) { job.skipped.push({ url: got.finalUrl, reason: 'redirected to another site' }); return; }
         if (LOGIN_PATH.test(fin.pathname) && !LOGIN_PATH.test(new URL(url).pathname)) {
+          // behind a sign-in: a visitor sees the sign-in page here, so THAT page is saved (once) in its place, and links open it
           loginSkipped++;
-          job.skipped.push({ url, reason: 'needs sign-in' });
+          const signInKey = pageKey(got.finalUrl);
+          signIn.add(key, signInKey);
+          if (!pages.has(signInKey)) {
+            pages.set(signInKey, {
+              key: signInKey, base: got.finalUrl, html: got.html, local: pageLocal(signInKey), rendered: !!got.rendered, fetchUrl: got.finalUrl,
+              etag: null, lastModified: null, hash: null, signIn: true, // never crawled further, and not part of the change check
+            });
+            seen.add(signInKey);
+            accepted++;
+          }
+          job.skipped.push({ url, reason: 'needs sign-in (the sign-in page is saved in its place)' });
           return;
         }
         page = {
           key, base: got.finalUrl, html: got.html, local: pageLocal(key), rendered: !!got.rendered,
-          fetchUrl: url, etag: got.etag || null, lastModified: got.lastModified || null, hash: got.rendered ? null : hashOf(got.html),
+          fetchUrl: url, etag: got.etag || null, lastModified: got.lastModified || null, hash: got.rendered ? null : signature(got.html),
         };
         pages.set(key, page);
         onStatus(S.pages(pages.size, accepted));
@@ -421,13 +427,24 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   job.throwIfCancelled();
   await rewriteCssFiles(job);
   timings.assets = Date.now() - ta;
+  // Exact-mirror savings only: identical files were already stored once (job.js); now images are re-packed WITHOUT changing a
+  // single pixel (each result verified, see optimize.js). Nothing lossy happens unless an admin turned IMAGE_COMPRESS on.
+  if (CFG.losslessOptimize) {
+    const o = await optimizeLossless(job).catch(() => null);
+    if (o) {
+      timings.optimize = o.ms;
+      log.event('optimize', { host: job.main.host, engine: o.engine, repacked: o.count, tried: o.tried, savedKB: Math.round(o.saved / 1024), dedupedKB: Math.round(job.dedupedBytes / 1024), rejected: o.rejected, ms: o.ms });
+    }
+  }
   const tb = Date.now();
 
   // ---- smart size budgeting: shrink images BEFORE leaving anything out ----
   const startPage = pages.get(startKey);
-  const pageRecs = [...pages.values()].map((p) => ({ url: p.base, local: p.local, type: 'text/html', size: bytesOf(p.html), page: p }));
+  const pageRecs = [...pages.values()].map((p) => ({ url: p.base, local: p.local, type: 'text/html', size: bytesOf(p.html), html: p.html, page: p }));
   const startRec = pageRecs.find((r) => r.page === startPage);
-  const totalEstimate = () => pageRecs.reduce((n, f) => n + estimate(f), 0) + [...job.files.values()].reduce((n, f) => n + estimate(f), 0);
+  const uniqueFiles = () => [...job.files.values()].filter((f) => !f.alias); // an alias is the same bytes as another file: stored once
+  await measureZipSizes(job, pageRecs); // real sizes inside the ZIP, so parts can be filled right up to the limit
+  const totalEstimate = () => pageRecs.reduce((n, f) => n + estimate(f), 0) + uniqueFiles().reduce((n, f) => n + estimate(f), 0);
   const capacityTotal = (CFG.partBytes - MB) * CFG.siteMaxParts;
   if (CFG.compressImages && totalEstimate() > capacityTotal) {
     const r = await compressImages(job, { needBytes: totalEstimate() - capacityTotal * 0.97 });
@@ -436,12 +453,16 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
 
   // decide what fits in the ZIP parts BEFORE rewriting links, so anything left out keeps its live URL
   const { bins, overflow } = packPrioritized(
-    [...pageRecs.filter((r) => r !== startRec), ...job.files.values()],
+    [...pageRecs.filter((r) => r !== startRec), ...uniqueFiles()],
     { capacity: CFG.partBytes - MB, maxParts: CFG.siteMaxParts, weigh: estimate, rankOf: rank, pinned: [startRec] },
   );
   for (const f of overflow) {
     if (f.page) { pages.delete(f.page.key); }
-    else { await fs.rm(path.join(siteDir, f.local), { force: true }); job.files.delete(f.url); job.totalBytes -= f.size; }
+    else { // a file that does not fit goes, together with every address that shared it: those links keep the live URL
+      await fs.rm(path.join(siteDir, f.local), { force: true });
+      for (const [u, r] of job.files) if (r.local === f.local) job.files.delete(u);
+      job.totalBytes -= f.size;
+    }
     job.skipped.push({ url: f.url, reason: `did not fit in ${CFG.siteMaxParts} ZIP parts`, size: f.size });
   }
   if (overflow.length) warnings.push({ c: 'overflow', n: overflow.length });
@@ -450,7 +471,8 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   const pageLookup = (abs) => {
     try {
       if (new URL(abs).search) return undefined;
-      return pages.get(pageKey(abs))?.local ?? job.files.get(abs)?.local;
+      const k = pageKey(abs);
+      return pages.get(k)?.local ?? job.files.get(abs)?.local ?? signIn.localFor(k, pages);
     } catch { return undefined; }
   };
   const writeFailed = new Set();
@@ -572,9 +594,9 @@ async function runWebsite({ first, html0, workDir, siteDir, onStatus, timings, w
   const zipBytes = parts.reduce((s, p) => s + p.bytes, 0);
 
   // what a later "Fresh copy" compares against (only plain pages can be checked cheaply)
-  const fingerprint = anyRendered
-    ? null
-    : [...pages.values()].filter((p) => p.hash).map((p) => ({ u: p.fetchUrl, e: p.etag, m: p.lastModified, h: p.hash }));
+  const entries = [...pages.values()].filter((p) => p.hash).map((p) => ({ u: p.fetchUrl, e: p.etag, m: p.lastModified, s: p.hash }));
+  entries.sort((a, b) => (a.u === first.finalUrl ? -1 : b.u === first.finalUrl ? 1 : 0)); // the home page is checked first
+  const fingerprint = anyRendered || !entries.length ? null : { at: Date.now(), sitemaps: sitemap.used.slice(0, 3), entries };
 
   return {
     kind: 'pages', parts, host: job.main.host, title,

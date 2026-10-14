@@ -28,6 +28,7 @@ export default {
     preview: '🖼 Capturando uma prévia…',
     resuming: '🔄 Fui reiniciado. Continuando de onde parei…',
     cancelling: '🛑 Cancelando…',
+    changes: '🔎 Verificando atualizações…',
     cancelled: '🛑 Cancelado.',
   },
   BTN: {
@@ -37,6 +38,7 @@ export default {
     deleteData: '🗑 Apagar todos os meus dados', yesDelete: 'Sim, apagar tudo', help: '📖 Ajuda', back: '◀ Voltar',
   },
   NOTE: {
+    loginPages: (n) => `🔐 ${n} ${n === 1 ? 'página exige' : 'páginas exigem'} login, então a página de login foi salva no lugar.`,
     signIn: () => '🔐 Esta página exige login, então só a página pública foi salva.',
     slow: () => '⏱️ Este site respondeu devagar, então alguns arquivos podem estar faltando.',
     browserFallback: () => '💡 Pode faltar conteúdo dinâmico nesta cópia.',
@@ -49,7 +51,7 @@ export default {
     part: (i, n) => `📦 Parte ${i} de ${n}`,
     partsHint: (n) => `📦 Enviado em ${n} ZIPs. Descompacte todos em uma pasta e abra index.html.`,
     justNow: 'agora mesmo', mAgo: (m) => `há ${m} min`, hAgo: (h) => `há ${h} h`, dAgo: (d) => `há ${d} d`,
-    footer: (kind, ago) => `⚡ ${{ history: 'Do seu histórico', unchanged: 'Continua atualizado', cache: 'Cópia instantânea', rescue: 'Cópia arquivada' }[kind] || 'Cópia instantânea'} · salvo ${ago}`,
+    footer: (kind, ago) => `${{ history: '⚡ Do seu histórico', unchanged: '✅ Verificado agora, sem mudanças', unverified: '⚠️ Não consegui verificar atualizações', cache: '⚡ Cópia instantânea', rescue: '📦 Cópia arquivada' }[kind] || '⚡ Cópia instantânea'} · salvo ${ago}`,
   },
   ERRORS: {
     invalid_url: '❌ Isso não parece um endereço de site. Tente algo como example.com',
@@ -66,6 +68,7 @@ export default {
   },
   MSG: {
     rescueNote: (date) => `📦 Tenho uma cópia salva de <b>${date}</b>.`,
+    rescueAuto: (date) => `📦 <b>Este site não está acessível agora.</b>\nAqui está a última cópia que salvei, de <b>${date}</b>.`,
     rescueGone: 'Essa cópia salva não está mais disponível.',
     busy: '⏳ Seu último download ainda está em andamento. Envio assim que ficar pronto.',
     cooldown: (s) => `⏳ Um momento. Você poderá enviar o próximo link em ${s} s.`,

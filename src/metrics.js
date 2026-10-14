@@ -9,6 +9,8 @@ export function inc(name, labels = {}, n = 1) {
   counters.set(k, (counters.get(k) || 0) + n);
 }
 
+export const counter = (name, labels = {}) => counters.get(`${name}${labelText(labels)}`) || 0;
+
 const BUCKETS = [1, 5, 10, 30, 60, 120, 300, 600];
 const hist = new Map(); // name -> { counts, sum, count }
 export function observe(name, seconds) {

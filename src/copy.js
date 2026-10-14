@@ -56,14 +56,16 @@ const EN = {
     resuming: '🔄 I was restarted. Picking up where I left off…',
     cancelling: '🛑 Cancelling…',
     cancelled: '🛑 Cancelled.',
-    changes: '🔎 Checking whether anything changed…',
+    changes: '🔎 Checking for updates…',
   },
 
   // ---- buttons
   BTN: {
     cancel: '✖ Cancel',
     preview: '🖼 Preview',
-    fresh: '🔄 Fresh copy',
+    fresh: '🔄 Fresh copy', // only on old messages from earlier versions; people no longer get buttons
+    forceRebuild: '🔄 Force rebuild',
+    details: 'ℹ️ Details',
     rescue: (date) => `📦 Saved copy · ${date}`,
     retry: '🔁 Try again',
     clearAll: '🗑 Clear history',
@@ -80,7 +82,7 @@ const EN = {
     signIn: () => '🔐 This page requires a sign-in, so only the public page was saved.',
     restricted: () => '🔒 This site limits automated access, so this is the public page it shows visitors.',
     signInForm: () => "🔐 There's a sign-in form here. Anything behind it isn't included.",
-    loginPages: (n) => `🔐 ${n} ${plural(n, 'page needs', 'pages need')} a sign-in and ${plural(n, 'was', 'were')} left out.`,
+    loginPages: (n) => `🔐 ${n} ${plural(n, 'page needs', 'pages need')} a sign-in, so the sign-in page is saved in ${plural(n, 'its', 'their')} place.`,
     pageLimit: (n) => `📄 This site has more pages than I can save at once, so I saved the first ${n}.`,
     overflow: (n) => `📦 ${n} ${plural(n, 'file', 'files')} didn't fit in the ZIP parts and ${plural(n, 'was', 'were')} left out.`,
     robots: (n) => `🤖 ${n} ${plural(n, 'page was', 'pages were')} skipped because the site asks bots not to copy ${plural(n, 'it', 'them')}.`,
@@ -101,7 +103,10 @@ const EN = {
     mAgo: (m) => `${m}m ago`,
     hAgo: (h) => `${h}h ago`,
     dAgo: (d) => `${d}d ago`,
-    footer: (kind, ago) => `⚡ ${{ history: 'From your history', unchanged: 'Still up to date', cache: 'Instant copy', rescue: 'Archived copy' }[kind] || 'Instant copy'} · saved ${ago}`,
+    footer: (kind, ago) => `${{
+      history: '⚡ From your history', unchanged: '✅ Checked just now, nothing changed', unverified: "⚠️ Couldn't check for updates",
+      cache: '⚡ Instant copy', rescue: '📦 Archived copy',
+    }[kind] || '⚡ Instant copy'} · saved ${ago}`,
   },
 
   // ---- errors: backend code -> human text
@@ -146,12 +151,13 @@ const EN = {
     domainCap: (n, host) => `📅 You've saved ${b(esc(host))} ${n} times today. Try again tomorrow, or use the copy you already have in /history.`,
     siteBusyToday: (host) => `📅 ${b(esc(host))} has been saved many times today already. Try again tomorrow.`,
     paused: (min) => `⏸ Several attempts in a row didn't work out, so I'm pausing for about ${min} min. Please check the addresses and try again after that.`,
-    retrySoon: '⏳ I just checked this one. Give it a few minutes, or tap Try again.',
+    retrySoon: '⏳ I just tried this one. Give it a few minutes.',
     moreLinks: (n) => `🔗 I found ${n} links. I'm saving the first one. Send the others one at a time.`,
     noLink: `I couldn't find a website address in that message. Send a link like ${code('example.com')}`,
     unchanged: "✅ Nothing has changed on this site since I saved it, so here's the same copy.",
     cancelNone: 'That job has already finished.',
     rescueNote: (date) => `📦 I have a saved copy from ${b(date)}.`,
+    rescueAuto: (date) => `📦 ${b("This site isn't reachable right now.")}\nHere's the latest copy I saved, from ${b(date)}.`,
     rescueGone: 'That saved copy is no longer available.',
     restartLost: (host) => `⚠️ I was restarted while saving ${b(esc(host))} and couldn't finish. Please send the link again.`,
     cancelOthers: "Others asked for this site too, so I'll finish it.",
@@ -225,7 +231,8 @@ export function tr(lang = 'en') {
   L.date = (ms) => new Intl.DateTimeFormat(code, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(ms);
   L.previewCaption = (host) => `🖼 ${b(esc(host))}\n${i(loc.previewLine || 'Live preview of the page as it is right now.')}`;
   // buttons under a result: only what makes sense (a fresh copy only for a saved copy)
-  L.actionsFor = ({ refresh = false } = {}) => [...(refresh ? [{ text: L.BTN.fresh, cb: 'r' }] : []), { text: L.BTN.preview, cb: 'p' }];
+  // people get no buttons under a result (the bot decides what is current); this is the admin set only
+  L.actionsFor = () => [{ text: L.BTN.forceRebuild, cb: 'r' }, { text: L.BTN.details, cb: 'd' }, { text: L.BTN.preview, cb: 'p' }];
   L.failureActions = (code) => (RETRY_CODES.has(code) ? [{ text: L.BTN.retry, cb: 'r' }] : []);
   L.caption = (stored) => renderCaption(L, stored);
   bundles.set(code, L);
@@ -278,6 +285,9 @@ export const codeOf = (e) => (e instanceof UserError ? e.code : e?.message === '
 export const RETRY_CODES = new Set(['timeout', 'refused', 'reset', 'network', 'server_error', 'rate_limited', 'http_error', 'redirects', 'queue_full', 'send_failed']);
 
 // a saved copy is worth offering when the live site could not be saved (not for typos, private addresses or our own busy signal)
+// problems that usually pass on their own: the bot retries these twice, quietly, before telling anyone
+export const AUTO_RETRY_CODES = new Set(['timeout', 'refused', 'reset', 'network', 'server_error', 'rate_limited', 'http_error']);
+
 export const RESCUE_CODES = new Set(['dns', 'not_found', 'forbidden', 'auth', 'cloudflare', 'bot_blocked', 'geo_blocked', 'rate_limited', 'server_error', 'http_error', 'timeout', 'refused', 'reset', 'ssl', 'redirects', 'network', 'internal', 'send_failed']);
 
 export const ENGLISH = EN; // for tests

@@ -11,6 +11,8 @@ import path from 'node:path';
 import { HarnessTelegram, makeTelegramClass } from './helpers/harness-telegram.js';
 import { tgError } from './helpers/fake-telegram.js';
 import { htmlProblems } from './helpers/html.js';
+import { signature } from '../src/signature.js';
+import { sectionKey, urlKey } from '../src/url.js';
 
 if (typeof mock.module !== 'function') {
   test('bot integration: skipped (needs Node 22.3+ and --experimental-test-module-mocks)', { skip: true }, () => {});
@@ -20,8 +22,8 @@ if (typeof mock.module !== 'function') {
 
 async function run() {
   Object.assign(process.env, {
-    BOT_TOKEN: '123:test', ADMIN_IDS: '999', PROFILE_SYNC: 'false', ENABLE_BROWSER: 'false', HEALTH: 'false',
-    COOLDOWN_SEC: '1', DAILY_LIMIT: '0', RESUME: 'false', NODE_ENV: 'test',
+    BOT_TOKEN: '123:test', ADMIN_IDS: '999', PROFILE_SYNC: 'false', ENABLE_BROWSER: 'true', HEALTH: 'false',
+    COOLDOWN_SEC: '1', DAILY_LIMIT: '50', RESUME: 'false', NODE_ENV: 'test', RETRY_DELAY_SEC: '0.1',
     ARCHIVE_MIN_GAP_MS: '0', ARCHIVE_RATE_PER_MIN: '600', // pacing is proven in archive.test.js with a controllable clock; here real time would only slow the run
   });
   for (const k of ['REDIS_URL', 'DATABASE_URL', 'PORT', 'WEBHOOK_DOMAIN', 'LIVE_CHANNEL_ID', 'VAULT_CHANNEL_ID', 'OPS_CHAT_ID']) delete process.env[k];
@@ -30,6 +32,7 @@ async function run() {
   const LIVE = -1001000000001; const VAULT = -1001000000002; const OPS = -1001000000003;
   const world = new HarnessTelegram();
   world.addChat(ADMIN, { type: 'private' }).addChat(USER, { type: 'private' }).addChat(LIVE).addChat(VAULT).addChat(OPS, { type: 'supergroup', is_forum: true, title: 'Ops' });
+  for (const id of [222, 333, 444, 555, 777, 888]) world.addChat(id, { type: 'private' });
   world.chats.get(LIVE).title = 'Live'; world.chats.get(VAULT).title = 'Vault';
 
   // ---- the three replaced modules
@@ -52,25 +55,35 @@ async function run() {
   mock.module('telegraf', { namedExports: { Telegraf, Telegram, Markup } });
 
   let buildImpl = null;
+  let shots = 0;
   const builds = [];
+  const attempts = {};
+  // a tiny website for the change checks (an IP address needs no DNS); the test decides what it says
+  const PAGE = (price) => `<html><head><title>Shop</title><link rel="stylesheet" href="/a.css"></head><body><h1>Prices</h1><p>Price: ${price}</p></body></html>`;
+  let siteHtml = PAGE(20);
+  let siteCalls = 0;
+  globalThis.fetch = async () => { siteCalls++; return siteHtml == null ? new Response('down', { status: 503 }) : new Response(siteHtml, { status: 200, headers: { 'content-type': 'text/html' } }); };
   mock.module(new URL('../src/site.js', import.meta.url).href, { namedExports: { downloadWebsite: (...a) => buildImpl(...a) } });
   mock.module(new URL('../src/browser.js', import.meta.url).href, {
     namedExports: {
-      warmBrowser: async () => {}, verifyBrowser: async () => true, closeBrowser: async () => {}, screenshotPage: async () => Buffer.from('x'),
+      warmBrowser: async () => {}, verifyBrowser: async () => true, closeBrowser: async () => {}, screenshotPage: async () => { shots++; return Buffer.from('x'); },
       browserSem: { run: (f) => f() }, browserStats: () => ({ up: false, active: 0, served: 0, crashes: 0, onDemand: true }),
       recycleIfBloated: async () => false, renderWithBrowser: async () => { throw new Error('no browser in this test'); },
     },
   });
   const { UserError } = await import('../src/errors.js');
+  const { kv, cache, limits } = await import('../src/store.js');
 
   const okBuild = async (parsed, workDir, onStatus) => {
     builds.push(parsed.url.href);
+    attempts[parsed.url.host] = (attempts[parsed.url.host] || 0) + 1;
     onStatus('Saving pages');
     const zipPath = path.join(workDir, `${parsed.url.host}.zip`);
     await fs.writeFile(zipPath, 'PK-fake-zip');
     return {
       kind: 'pages', parts: [{ zipPath, zipName: `${parsed.url.host}.zip`, bytes: 11 }], host: parsed.url.host, title: 'Example & <Docs>',
-      pages: 3, fileCount: 10, zipBytes: 5_000_000, mode: 'site-pages', warnings: [], skipped: 0, failed: 0, timings: {}, fingerprint: null, preview: null,
+      pages: 3, fileCount: 10, zipBytes: 5_000_000, mode: 'site-pages', warnings: [], skipped: 0, failed: 0, timings: {}, preview: null,
+      fingerprint: parsed.url.hostname === '8.8.8.8' ? { at: Date.now(), sitemaps: [], entries: [{ u: 'http://8.8.8.8/', e: null, m: null, s: signature(siteHtml) }] } : null,
     };
   };
   buildImpl = okBuild;
@@ -115,6 +128,8 @@ async function run() {
     }
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // a person's cooldown starts when their job has fully finished; wait for that instead of guessing
+  const idle = (uid) => waitFor(async () => !(await kv.get(`busy:${uid}`)) && (await limits.cooldownLeft(uid)) === 0, 8000, `person ${uid} to be free`);
   const msgs = (chat) => world.messages(chat);
   const text = (m) => m.text ?? m.caption ?? '';
   const buttons = (m) => (m.markup?.inline_keyboard ?? []).flat();
@@ -291,77 +306,231 @@ async function run() {
     assert.match(text(msgs(USER).at(-1)), /admins only/);
   });
 
+  const keyOf = (u) => sectionKey(urlKey(new URL(u.startsWith('http') ? u : `https://${u}`)));
+  const day = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const used = async (uid) => Number((await kv.get(`quota:${uid}:${day()}`)) || 0);
+  // make a saved copy look old, and forget the "they were just given this" memory, so the next request has to check
+  async function age(u, ms) {
+    const k = keyOf(u);
+    const d = await cache.getResult(k);
+    await cache.setResult(k, { ...d, at: Date.now() - ms, checkedAt: undefined });
+    await kv.del(`probe:${k}`);
+    for (const uid of [111, 222, 333, 444, 555, 777, 888]) await kv.del(`last:${uid}:${k}`);
+  }
+  const docsOf = (chat) => msgs(chat).filter((m) => m.kind === 'document');
+  const noButtons = (m) => assert.deepEqual(buttons(m), [], 'people get no buttons under a result');
+  const noteLeft = (chat) => msgs(chat).some((m) => /Checking for updates/.test(text(m)));
+
   let firstDoc;
-  test('a user sends a link inside a sentence: they get the ZIP with a clean card, and it is archived to Live', async () => {
+  test('a user sends a link inside a sentence: they get the ZIP, a clean card and no buttons, and it is archived to Live', async () => {
     await say(USER, 'please check https://Example.com/docs?utm_source=x&fbclid=1 thanks');
-    firstDoc = await waitFor(() => msgs(USER).find((m) => m.kind === 'document'), 8000, 'the ZIP');
+    firstDoc = await waitFor(() => docsOf(USER)[0], 8000, 'the ZIP');
     assert.deepEqual(builds, ['https://example.com/docs']);                     // tracking parameters stripped
     assert.match(firstDoc.caption, /^✅ <b>example\.com<\/b>\nExample &amp; &lt;Docs&gt;\n\n📄 3 pages  ·  🗂 7 files  ·  💾 4\.8 MB$/);
-    assert.deepEqual(buttons(firstDoc).map((b) => b.text), ['🖼 Preview']);      // a fresh build offers a preview, not a refresh
+    noButtons(firstDoc);                                                         // not Fresh copy, not Preview, nothing to decide
     await waitFor(() => !msgs(USER).some((m) => m.kind === 'text' && /Saving|Opening/.test(text(m))), 4000, 'the progress message to be removed');
+    assert.equal(await used(USER), 1);
 
     const posted = await waitFor(() => msgs(LIVE).find((m) => m.kind === 'document'), 8000, 'the Live post');
     assert.equal(posted.file, firstDoc.file, 'the archive reuses the same Telegram file: no second upload');
-    assert.match(posted.caption, /📦 <b>example\.com<\/b>/);
     assert.match(posted.caption, /#example_com #\d{4}_\d{2} #id_[0-9a-f]{6} #site/);
-    assert.match(posted.caption, /⏳ <i>Live until /);
     assert.doesNotMatch(JSON.stringify(posted), /111|u111/, 'nothing about the person reaches the archive');
-
     await say(ADMIN, '/archive example.com');
     const found = await waitFor(() => msgs(ADMIN).filter((m) => /Archive<\/b>  <i>example\.com/.test(text(m))).at(-1), 4000, 'the search result');
     assert.match(text(found), /<a href="https:\/\/t\.me\/c\/1000000001\/\d+">Live<\/a>/);
   });
 
-  test('asking again is instant and is NOT archived twice', async () => {
-    await sleep(1200);                                       // the 1 s cooldown between a person's downloads
+  test('another person asking for the same site gets it instantly, with no build and no second archive post', async () => {
     const before = msgs(LIVE).filter((m) => m.kind === 'document').length;
-    await say(USER, 'example.com/docs');
-    const again = await waitFor(() => msgs(USER).filter((m) => m.kind === 'document').at(-1)?.id !== firstDoc.id && msgs(USER).filter((m) => m.kind === 'document').at(-1), 4000, 'the instant copy');
-    assert.match(again.caption, /Instant copy · saved just now/);
-    assert.deepEqual(buttons(again).map((b) => b.text), ['🔄 Fresh copy', '🖼 Preview']);
+    await say(222, 'example.com/docs');
+    const copy = await waitFor(() => docsOf(222)[0], 4000, 'the instant copy');
+    assert.match(copy.caption, /<i>⚡ Instant copy · saved just now<\/i>$/);
+    noButtons(copy);
     assert.equal(builds.length, 1, 'no second build');
-    await sleep(2500);
-    assert.equal(msgs(LIVE).filter((m) => m.kind === 'document').length, before, 'an instant copy is not archived again');
+    await sleep(2200);
+    assert.equal(msgs(LIVE).filter((m) => m.kind === 'document').length, before, 'a copy that is sent again is not archived again');
   });
 
-  test('the site is gone: the person is offered the archived copy, and gets it', async () => {
-    await sleep(1200);
-    const copy = msgs(USER).filter((m) => m.kind === 'document').at(-1);
-    const fresh = findButton(copy, /^r:/);
-    assert.ok(fresh);
+  test('the SAME person asking again wants it fresh: this copy cannot be verified, so it is rebuilt', async () => {
+    await idle(USER);
+    await say(USER, 'example.com/docs');
+    await waitFor(() => builds.length === 2, 8000, 'the second build');
+    const second = await waitFor(() => docsOf(USER)[1], 8000, 'the new ZIP');
+    assert.doesNotMatch(second.caption, /saved|Instant|Checked/, 'a fresh build has no "from cache" footer');
+    noButtons(second);
+    assert.equal(noteLeft(USER), false);
+    assert.equal(await used(USER), 2, 'a rebuild the person asked for counts');
+    await waitFor(() => msgs(LIVE).filter((m) => m.kind === 'document').length === 2, 8000, 'the new build to be archived');
+  });
+
+  test('check before send: UNCHANGED sends the saved ZIP at once, and the check is not repeated for the next person', async () => {
+    siteHtml = PAGE(20);
+    await say(222, 'http://8.8.8.8/');
+    await waitFor(() => builds.includes('http://8.8.8.8/'), 8000, 'the first build');
+    await waitFor(() => docsOf(222)[1], 8000, 'the ZIP');
+    const buildsBefore = builds.length;
+    await age('http://8.8.8.8/', 3 * 3600_000);
+    const callsBefore = siteCalls;
+    await say(333, 'http://8.8.8.8/');
+    const doc = await waitFor(() => docsOf(333)[0], 6000, 'the checked copy');
+    assert.match(doc.caption, /<i>✅ Checked just now, nothing changed · saved 3h ago<\/i>$/);
+    noButtons(doc);
+    assert.equal(builds.length, buildsBefore, 'nothing was rebuilt');
+    assert.equal(siteCalls, callsBefore + 1, 'the check was one small request');
+    assert.equal(noteLeft(333), false, 'the "checking" note is gone');
+    await say(444, 'http://8.8.8.8/');
+    const next = await waitFor(() => docsOf(444)[0], 4000, 'the next copy');
+    assert.match(next.caption, /⚡ Instant copy/);
+    assert.equal(siteCalls, callsBefore + 1, 'a copy checked a moment ago is not checked again');
+  });
+
+  test('check before send: CHANGED is rebuilt silently, nobody is asked anything, and it costs no quota', async () => {
+    siteHtml = PAGE(25);                                                         // the shop raised its price
+    await age('http://8.8.8.8/', 3 * 3600_000);
+    const before = builds.length;
+    await say(555, 'http://8.8.8.8/');
+    await waitFor(() => builds.length === before + 1, 8000, 'the automatic rebuild');
+    const doc = await waitFor(() => docsOf(555)[0], 8000, 'the new ZIP');
+    assert.doesNotMatch(doc.caption, /saved|Instant|Checked/);
+    noButtons(doc);
+    assert.ok(!msgs(555).some((m) => /changed|rebuild|fresh|new copy/i.test(text(m)) && m.kind === 'text' && !/Saving|Opening|Sending/.test(text(m))), 'the person was told nothing and asked nothing');
+    assert.equal(await used(555), 0, 'a rebuild because the SITE changed is free');
+    await idle(555);
+    await say(555, 'other.example');
+    await waitFor(() => docsOf(555)[1], 8000, 'an ordinary build');
+    assert.equal(await used(555), 1, 'ordinary builds still count');
+    // and the rebuilt copy is now the one everybody gets
+    await say(444, 'http://8.8.8.8/');
+    await waitFor(() => docsOf(444)[1], 4000, 'the new copy for the next person');
+    assert.equal(builds.length, before + 2, 'the rebuild and the ordinary build, nothing else');
+    assert.match(docsOf(444)[1].caption, /Instant copy/, 'the rebuilt copy is what the next person gets, with no new check needed');
+  });
+
+  test('check before send: if the site cannot be checked, the saved copy is sent with an honest label; asking twice rebuilds', async () => {
+    siteHtml = PAGE(25);
+    await say(777, 'http://8.8.8.8/');                                           // a fresh baseline
+    await waitFor(() => docsOf(777)[0], 6000, 'a copy');
+    await age('http://8.8.8.8/', 3 * 3600_000);
+    siteHtml = null;                                                             // the site is answering 503 now
+    const before = builds.length;
+    await say(888, 'http://8.8.8.8/');
+    const doc = await waitFor(() => docsOf(888)[0], 6000, 'the saved copy');
+    assert.match(doc.caption, /<i>⚠️ Couldn't check for updates · saved 3h ago<\/i>$/);
+    noButtons(doc);
+    assert.equal(builds.length, before, 'no rebuild just because the check failed');
+    siteHtml = PAGE(25);
+    await idle(888);
+    await say(888, 'http://8.8.8.8/');                                           // asked AGAIN: they want a new one
+    await waitFor(() => builds.length === before + 1 || docsOf(888).length === 2, 8000, 'the rebuild');
+  });
+
+  test('quiet retries: two failures that pass on their own are never shown to the person', async () => {
+    let n = 0;
+    const real = buildImpl;
+    buildImpl = async (parsed, wd, onStatus, opts) => { n++; if (n <= 2) throw new UserError('slow', 'timeout'); return real(parsed, wd, onStatus, opts); };
+    await idle(888);
+    await say(888, 'flaky.example');
+    const doc = await waitFor(() => docsOf(888).find((m) => /flaky\.example/.test(m.caption || '')), 8000, 'the ZIP after retries');
+    assert.equal(attempts['flaky.example'], 1, 'it took three tries, the third one built');
+    assert.equal(n, 3);
+    assert.ok(!msgs(888).some((m) => /taking too long|Something went wrong/.test(text(m))), 'no error was ever shown');
+    noButtons(doc);
+    buildImpl = real;
+  });
+
+  test('quiet retries: when all three attempts fail, the person gets one plain sentence and no buttons (an admin gets Try again)', async () => {
+    let n = 0;
+    buildImpl = async () => { n++; throw new UserError('slow', 'timeout'); };
+    await idle(888);
+    await say(888, 'dead.example');
+    const err = await waitFor(() => msgs(888).find((m) => /taking too long to respond/.test(text(m))), 8000, 'the error');
+    assert.equal(n, 3, 'tried, retried twice, then gave up');
+    assert.deepEqual(buttons(err), [], 'nothing to press');
+    assert.match(text(err), /^<b>⏱️ This site is taking too long to respond\.<\/b>/);
+    await say(ADMIN, 'dead2.example');
+    const adm = await waitFor(() => msgs(ADMIN).filter((m) => /taking too long/.test(text(m))).at(-1), 8000, 'the admin error');
+    assert.deepEqual(buttons(adm).map((b) => b.text), ['🔁 Try again']);
+    buildImpl = okBuild;
+  });
+
+  test('the site is gone: the person simply receives the last saved copy, with one plain line and no buttons', async () => {
+    await idle(USER);
     buildImpl = async () => { throw new UserError('dns', 'dns'); };
-    await tap(USER, { chat: USER, id: copy.id, markup: copy.markup }, fresh.callback_data);
-    const failure = await waitFor(() => msgs(USER).find((m) => m.kind === 'text' && /couldn't find that website/.test(text(m)) && /saved copy/.test(text(m))), 6000, 'the failure with a rescue offer');
-    assert.match(text(failure), /<b>[^<]*find that website\.<\/b>/);
-    assert.match(text(failure), /📦 I have a saved copy from <b>[A-Z][a-z]{2} \d{1,2}<\/b>\./);
-    const rescue = buttons(failure).find((b) => /^ar:\d+$/.test(b.callback_data));
-    assert.ok(rescue, 'the rescue button is there');
-    assert.match(rescue.text, /^📦 Saved copy · /);
-    assert.deepEqual(htmlProblems(text(failure)), []);
-
-    const docsBefore = msgs(USER).filter((m) => m.kind === 'document').length;
-    await tap(USER, { chat: USER, id: failure.id, markup: failure.markup }, rescue.callback_data);
-    const sent = await waitFor(() => msgs(USER).filter((m) => m.kind === 'document')[docsBefore], 4000, 'the archived copy');
-    assert.equal(sent.file, firstDoc.file, 'the very same ZIP is handed back');
-    assert.match(sent.caption, /Archived copy · saved /);
-    assert.match(sent.caption, /^✅ <b>example\.com<\/b>/);
-
-    // Ops: the failure is a quiet log line (the visitor's problem, not ours), the rescue is noted, and no id appears
-    await waitFor(() => opsPosts(TOPIC.logs).some((m) => /saved copy sent/.test(m.text)), 6000, 'the Ops log lines');
+    const docsBefore = docsOf(USER).length;
+    await say(USER, 'example.com/docs');                                         // asked again, so it is checked, then rebuilt, and the build fails
+    const line = await waitFor(() => msgs(USER).find((m) => /isn't reachable right now/.test(text(m))), 8000, 'the explanation');
+    assert.match(text(line), /📦 <b>This site isn't reachable right now\.<\/b>\nHere's the latest copy I saved, from <b>[A-Z][a-z]{2} \d{1,2}<\/b>\./);
+    assert.deepEqual(buttons(line), []);
+    const rescued = await waitFor(() => docsOf(USER)[docsBefore], 6000, 'the saved copy');
+    assert.match(rescued.caption, /📦 Archived copy · saved /);
+    assert.deepEqual(buttons(rescued), []);
+    assert.equal(rescued.file, docsOf(USER)[1].file, 'the very same ZIP the person got before');
+    await waitFor(() => opsPosts(TOPIC.logs).some((m) => /archived copy sent|saved copy sent/.test(m.text)) || opsPosts(TOPIC.logs).some((m) => /🟡 example\.com  ·  <code>dns<\/code>/.test(m.text)), 6000, 'the Ops log lines');
     const logs = opsPosts(TOPIC.logs).map((m) => m.text).join('\n');
     assert.match(logs, /🟡 example\.com  ·  <code>dns<\/code>/);
     assert.doesNotMatch(logs, /111/);
     assert.ok(opsPosts(TOPIC.logs).every((m) => m.silent === true), 'logs are silent');
   });
 
+  test('the site is gone and only the ARCHIVE has it (the saved copy expired): the person still gets it', async () => {
+    await cache.dropResult(keyOf('example.com/docs'));
+    await say(222, 'example.com/docs');                                          // the failure is remembered for a few minutes: that path hands over the archived copy
+    const line = await waitFor(() => msgs(222).find((m) => /isn't reachable right now/.test(text(m))), 6000, 'the explanation');
+    assert.ok(line);
+    const back = await waitFor(() => docsOf(222).find((m) => /Archived copy/.test(m.caption || '')), 6000, 'the archived copy');
+    assert.deepEqual(buttons(back), []);
+    buildImpl = okBuild;
+  });
+
+  test('admins keep the controls people do not get: Force rebuild, Details and Preview', async () => {
+    await say(ADMIN, 'admin.example');
+    const doc = await waitFor(() => docsOf(ADMIN).find((m) => /admin\.example/.test(m.caption || '')), 8000, 'the admin result');
+    assert.deepEqual(buttons(doc).map((b) => b.text), ['🔄 Force rebuild', 'ℹ️ Details', '🖼 Preview']);
+    const details = buttons(doc).find((b) => /^d:/.test(b.callback_data));
+    await tap(ADMIN, { chat: ADMIN, id: doc.id, markup: doc.markup }, details.callback_data);
+    const info = await waitFor(() => msgs(ADMIN).filter((m) => /ℹ️ <b>admin\.example<\/b>/.test(text(m))).at(-1), 4000, 'the details');
+    assert.match(text(info), /recheck after 10 minutes/);
+    for (const row of [/saved\s+\d/, /verified\s+\d/, /mode\s+site-pages/, /content\s+10 files/, /can verify\s+no/, /last check\s+none yet/]) assert.match(text(info), row);
+    assert.deepEqual(htmlProblems(text(info)), []);
+    const before = builds.length;
+    await tap(ADMIN, { chat: ADMIN, id: doc.id, markup: doc.markup }, buttons(doc).find((b) => /^r:/.test(b.callback_data)).callback_data);
+    await waitFor(() => builds.length === before + 1, 6000, 'the forced rebuild');
+    await tap(USER, { chat: USER, id: doc.id, markup: doc.markup }, details.callback_data);   // a person pressing an admin button gets nothing
+    assert.equal(msgs(USER).filter((m) => /ℹ️ <b>admin\.example/.test(text(m))).length, 0);
+  });
+
+  test('/preview is a command, and every one is taken fresh: no old screenshot, no buttons', async () => {
+    const before = shots;
+    await say(333, '/preview http://8.8.8.8/');
+    const one = await waitFor(() => msgs(333).filter((m) => m.kind === 'photo')[0], 5000, 'the first preview');
+    await say(444, '/preview http://8.8.8.8/');
+    await waitFor(() => msgs(444).filter((m) => m.kind === 'photo')[0], 5000, 'the second preview');
+    assert.equal(shots, before + 2, 'each preview is a new screenshot');
+    assert.match(one.caption, /^🖼 <b>8\.8\.8\.8<\/b>\n<i>Live preview of the page as it is right now\.<\/i>$/);
+    assert.deepEqual(buttons(one), []);
+  });
+
+  test('buttons on old messages from earlier versions still work (as a normal request for people)', async () => {
+    const old = docsOf(USER)[0];
+    const k = keyOf('http://8.8.8.8/');
+    buildImpl = okBuild;
+    const before = shots;
+    await tap(USER, { chat: USER, id: old.id, markup: old.markup }, `p:${k}`);
+    await waitFor(() => shots === before + 1, 4000, 'the old Preview button');
+    await idle(USER);
+    await tap(USER, { chat: USER, id: old.id, markup: old.markup }, `r:${k}`);
+    await waitFor(() => msgs(USER).filter((m) => m.kind === 'document').length > docsOf(USER).length - 1, 4000, 'the old Fresh copy button answered');
+  });
+
   test('a failure of OURS goes to the Errors topic (loud, with details), and the person gets a plain message', async () => {
-    await sleep(1200);
+    await idle(USER);
     buildImpl = async () => { throw new Error('boom: kaput'); };
     await say(USER, 'broken.example');
     const err = await waitFor(() => msgs(USER).find((m) => /Something went wrong/.test(text(m))), 6000, 'the error message');
     assert.match(text(err), /<b>❌ Something went wrong\.<\/b>/);
     assert.doesNotMatch(text(err), /kaput/, 'technical detail never reaches the person');
-    const post = await waitFor(() => opsPosts(TOPIC.errors)[0], 6000, 'the Errors post');
+    const post = await waitFor(() => opsPosts(TOPIC.errors).find((p) => /internal/.test(p.text)), 6000, 'the Errors post');
+    assert.ok(!opsPosts(TOPIC.errors).some((p) => /timeout|dns/.test(p.text)), 'a dead or slow site is a quiet log line, never a loud error');
     assert.match(post.text, /❗ <b>Job failed<\/b>  <code>internal<\/code>/);
     assert.match(post.text, /🌐 broken\.example/);
     assert.match(post.text, /👤 user #[0-9a-f]{4}/);
@@ -371,7 +540,7 @@ async function run() {
   });
 
   test('Cancel stops a running job and says so', async () => {
-    await sleep(1200);
+    await idle(USER);
     let sawAbort = false;
     buildImpl = (parsed, workDir, onStatus, opts) => new Promise((_, reject) => {
       opts.signal.addEventListener('abort', () => { sawAbort = true; reject(new UserError('cancelled', 'cancelled')); });

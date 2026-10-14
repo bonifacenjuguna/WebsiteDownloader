@@ -8,4 +8,5 @@ export const rank = (f) => {
   return 3;
 };
 // already-compressed formats stay at full size in the ZIP; text compresses roughly 3x
-export const estimate = (f) => (rank(f) <= 2 ? f.size : Math.round(f.size * 0.35));
+// `zsize` is the real size inside the ZIP when measure.js has been run; the guess is only the fallback
+export const estimate = (f) => f.zsize ?? (rank(f) <= 2 ? f.size : Math.round(f.size * 0.35));

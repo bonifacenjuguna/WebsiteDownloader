@@ -14,9 +14,10 @@ import { warmBrowser, verifyBrowser, closeBrowser, screenshotPage, browserSem, b
 import { makeUpdater } from './updater.js';
 import { syncProfile } from './profile.js';
 import { renderMenu, renderPage } from './help.js';
-import { tr, LANGS, mapLang, buildSummary, codeOf, RESCUE_CODES, size } from './copy.js';
+import { tr, LANGS, mapLang, buildSummary, codeOf, RESCUE_CODES, AUTO_RETRY_CODES, size } from './copy.js';
+import { decideFreshness, afterCheck } from './recheck.js';
 import * as db from './db.js';
-import { initStore, closeStore, cache, limits, previews, quota, lang as langStore, kvMode, kv } from './store.js';
+import { initStore, closeStore, cache, recent, limits, previews, quota, lang as langStore, kvMode, kv } from './store.js';
 import * as policy from './policy.js';
 import * as fingerprint from './fingerprint.js';
 import * as resume from './resume.js';
@@ -28,6 +29,7 @@ import * as sharedCache from './sharedcache.js';
 import { startHousekeeping, canStartMore, diskFreeMb } from './housekeeping.js';
 import { syncCommands } from './commands.js';
 import { memoryShare, memoryMb } from './health-util.js';
+import { describeDuration } from './duration.js';
 import { esc, b, i, code, code as mono, dot, ms as fmtMs, uptime as fmtUptime, utc, table, stripTags } from './fmt.js';
 import { createArchive } from './archive/service.js';
 import { MemoryStore, PgStore } from './archive/store.js';
@@ -111,17 +113,48 @@ const denyAdmin = async (ctx) => { const L = await Lof(ctx); return ctx.reply(CF
 // ---------- buttons ----------
 const chunk2 = (arr) => { const out = []; for (let i = 0; i < arr.length; i += 2) out.push(arr.slice(i, i + 2)); return out; };
 const buttons = (key, actions) => Markup.inlineKeyboard(chunk2(actions.map((a) => Markup.button.callback(a.text, `${a.cb}:${key}`))));
-const keyboard = (L, key, opts) => buttons(key, L.actionsFor(opts));
-// after a failure: a saved copy when the archive has one, then the one useful alternative (Try again), or nothing
-const failureMarkup = (L, code, key, rescue = null) => {
+// Under a result, people get NO buttons: the bot decides what is current. Admins get Force rebuild / Details / Preview.
+const keyboard = (L, key) => buttons(key, L.actionsFor());
+const resultMarkup = (ctx, L, key) => (isAdmin(ctx) && key ? keyboard(L, key) : {});
+// after a failure people get a plain sentence; admins also get Try again when it may pass
+const failureMarkup = (L, code, key, admin = false) => {
+  if (!admin) return null;
   const retry = L.failureActions(code).map((a) => Markup.button.callback(a.text, `${a.cb}:${key}`));
-  const rows = [...(rescue ? [[Markup.button.callback(L.BTN.rescue(L.date(rescue.createdAt)), `ar:${rescue.id}`)]] : []), ...chunk2(retry)];
-  return rows.length ? Markup.inlineKeyboard(rows) : null;
+  return retry.length ? Markup.inlineKeyboard(chunk2(retry)) : null;
 };
 // the newest archived copy of this site, when the live one could not be saved (only a copy that still has its files)
 async function rescueFor(code, key) {
   if (!CFG.rescue || !CFG.archive || !RESCUE_CODES.has(code)) return null;
   try { const e = await archive.latestFor(key); return e && e.fileIds.length ? e : null; } catch { return null; }
+}
+// hands an archived copy to a person (the same card a normal result has, built from what the archive remembers)
+async function sendArchivedCopy(ctx, L, entry) {
+  const summary = JSON.stringify({ v: 1, kind: entry.kind, host: entry.host, title: entry.title, pages: entry.pages, files: entry.files, dirs: 0, bytes: entry.bytes, parts: entry.parts, notes: [] });
+  let sent = await sendStored(ctx, { fileId: entry.fileIds.join(','), caption: summary, at: entry.createdAt }, 'rescue', L);
+  if (!sent) { // the Telegram file reference expired: copy the ZIP straight from the Live or Vault post instead
+    try {
+      const footer = `\n\n${i(L.CAP.footer('rescue', L.ago(Date.now() - entry.createdAt)))}`;
+      sent = await archive.copyZipsTo(ctx.chat.id, entry, (part, of) => (of > 1 ? b(L.CAP.part(part, of)) : `${L.caption(summary)}${footer}`));
+    } catch { sent = false; }
+  }
+  return sent;
+}
+// The site is down, blocked or gone: if the archive holds a copy, the person just gets it, with one plain line. No button to find.
+// `announce(text)` shows the line (it replaces the progress message when there is one).
+async function autoRescue(ctx, L, code, key, announce) {
+  if (!CFG.rescue || !RESCUE_CODES.has(code)) return false;
+  const saved = await cache.getResult(key).catch(() => null); // the copy we gave someone before
+  if (saved) {
+    await announce(L.MSG.rescueAuto(L.date(saved.at)));
+    if (await sendStored(ctx, saved, 'rescue', L)) { metrics.inc('wd_cache_total', { kind: 'rescue' }); return true; }
+  }
+  const entry = await rescueFor(code, key);
+  if (!entry) return false;
+  await announce(L.MSG.rescueAuto(L.date(entry.createdAt)));
+  if (!(await sendArchivedCopy(ctx, L, entry))) return false;
+  metrics.inc('wd_cache_total', { kind: 'rescue' });
+  archive.ops.post('logs', `📦 ${esc(entry.host)}  ${i('archived copy sent (site unreachable)')}  ${mono(`#id_${entry.tag}`)}  ·  ${archive.userTag(ctx.from.id)}`);
+  return true;
 }
 const NO_KB = { reply_markup: { inline_keyboard: [] } };
 
@@ -310,6 +343,7 @@ bot.command('stats', async (ctx) => {
       `${dot(success, 80, 60, true)} Success  ${code(pctText(success))}  ${i('all time, every failure counted')}`,
       `${dot(real, 90, 75, true)} Real success  ${code(pctText(real))}  ${i('7 days, without typos, private addresses and protected sites')}`,
       `⚡ Cache hits  ${code(pctText(pct(st.cached, st.total)))}`,
+      `🔎 Update checks since start  unchanged ${code(metrics.counter('wd_cache_total', { kind: 'checked_unchanged' }))}  ·  changed ${code(metrics.counter('wd_cache_total', { kind: 'changed' }))}  ·  couldn't check ${code(metrics.counter('wd_cache_total', { kind: 'unverified' }))}  ·  quiet retries ${code(metrics.counter('wd_retries_total', { code: 'timeout' }) + metrics.counter('wd_retries_total', { code: 'server_error' }) + metrics.counter('wd_retries_total', { code: 'network' }))}`,
       `⏱ Build time  median ${code(fmtMs(st.p50))}  ·  95% under ${code(fmtMs(st.p95))}  ${i('7 days')}`,
       ...(sc.enabled && sc.hits + sc.misses ? [`🧩 Shared cache  ${code(pctText(pct(sc.hits, sc.hits + sc.misses)))} of library files reused`] : []),
     );
@@ -404,13 +438,41 @@ bot.action(/^hp:(m|n|x|\d+)$/, async (ctx) => {
   await ctx.editMessageText(view.text, helpExtra(view)).catch(() => {}); // "not modified" when the same page is tapped again
 });
 
-// Fresh copy / Try again (and the old 🧭 button on messages sent by earlier versions: browser mode is automatic now)
+// Admins: Force rebuild / Try again. Older messages still carry the buttons people used to get: for a person that is simply a
+// normal request (the bot checks for changes itself), for an admin it forces a rebuild.
 bot.action(/^(?:rs?|b):([a-f0-9]{40})$/, async (ctx) => {
   const L = await Lof(ctx);
   await ctx.answerCbQuery('🔄').catch(() => {});
   const url = await cache.urlFor(ctx.match[1]);
   if (!url) return ctx.reply(L.MSG.refreshLost);
-  handleRequest(ctx, url, { force: true }).catch(console.error);
+  handleRequest(ctx, url, { force: isAdmin(ctx) }).catch(console.error);
+});
+
+// ℹ️ Details (admins): what the bot knows about a saved copy
+bot.action(/^d:([a-f0-9]{40})$/, async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery().catch(() => {});
+  await ctx.answerCbQuery('ℹ️').catch(() => {});
+  const key = ctx.match[1];
+  const [data, check, entry, baseline] = await Promise.all([cache.getResult(key), fingerprint.lastCheck(key), archive.latestFor(key).catch(() => null), fingerprint.available(key)]);
+  if (!data) return ctx.reply(`ℹ️ ${i('No saved copy of this site.')}`);
+  const ago = (t) => fmtUptime(Date.now() - t);
+  const link = (url, name) => (url ? `<a href="${esc(url)}">${name}</a>` : '');
+  const t = data.timings || {};
+  const phases = ['fetch', 'browser', 'map', 'crawl', 'assets', 'build', 'zip', 'upload'].filter((k) => t[k] != null).map((k) => `${k} ${fmtMs(t[k])}`).join(' · ');
+  const rows = [
+    ['saved', `${ago(data.at)} ago`],
+    ['verified', `${ago(data.checkedAt ?? data.at)} ago`],
+    ['mode', data.mode || '?'],
+    ['content', `${data.files} files · ${size(data.zipBytes)}`],
+    ['can verify', baseline ? 'yes' : 'no (browser-rendered or older copy)'],
+    ['last check', check ? `${check.verdict} (${check.reason}${check.total ? `, ${check.checked}/${check.total} pages` : ''}, ${fmtMs(check.ms)}, ${ago(check.at)} ago)` : 'none yet'],
+  ];
+  await ctx.reply([
+    `ℹ️ ${b(esc(data.host))}  ${i(`recheck after ${describeDuration(CFG.recheckAfterMs)}`)}`,
+    table(rows),
+    ...(phases ? [i(`build: ${phases}`)] : []),
+    ...(entry ? [`📦 ${[link(entry.liveLink, 'Live'), link(entry.vaultLink, 'Vault')].filter(Boolean).join('  ·  ') || i(entry.state)}  ${mono(`#id_${entry.tag}`)}`] : []),
+  ].join('\n'));
 });
 
 bot.action(/^p:([a-f0-9]{40})$/, async (ctx) => {
@@ -422,25 +484,14 @@ bot.action(/^p:([a-f0-9]{40})$/, async (ctx) => {
   sendPreview(ctx, url, L).catch(console.error);
 });
 
-// 📦 Saved copy: the site could not be saved just now, so the archive hands back the last copy it has
+// 📦 Saved copy (the button on messages sent by earlier versions; now the bot hands the copy over by itself)
 bot.action(/^ar:(\d+)$/, async (ctx) => {
   const L = await Lof(ctx);
   await ctx.answerCbQuery('📦').catch(() => {});
   if (!(await authorize(ctx, L))) return;
   const entry = await archive.getEntry(Number(ctx.match[1])).catch(() => null);
-  if (!entry?.fileIds.length) return ctx.reply(L.MSG.rescueGone);
-  // the same card a normal result has, built from what the archive remembers
-  const summary = JSON.stringify({ v: 1, kind: entry.kind, host: entry.host, title: entry.title, pages: entry.pages, files: entry.files, dirs: 0, bytes: entry.bytes, parts: entry.parts, notes: [] });
-  let sent = await sendStored(ctx, { fileId: entry.fileIds.join(','), caption: summary, at: entry.createdAt, urlKey: entry.urlKey }, 'rescue', L);
-  if (!sent) { // the Telegram file reference expired: copy the ZIP straight from the Live or Vault post instead
-    try {
-      const footer = `\n\n${i(L.CAP.footer('rescue', L.ago(Date.now() - entry.createdAt)))}`;
-      sent = await archive.copyZipsTo(ctx.chat.id, entry, (part, of) => (of > 1 ? b(L.CAP.part(part, of)) : `${L.caption(summary)}${footer}`));
-    } catch { sent = false; }
-  }
-  if (!sent) return ctx.reply(L.MSG.rescueGone);
+  if (!entry?.fileIds.length || !(await sendArchivedCopy(ctx, L, entry))) return ctx.reply(L.MSG.rescueGone);
   metrics.inc('wd_cache_total', { kind: 'rescue' });
-  archive.ops.post('logs', `📦 ${esc(entry.host)}  ${i('saved copy sent')}  ${mono(`#id_${entry.tag}`)}  ·  ${archive.userTag(ctx.from.id)}`);
 });
 
 // ✖ Cancel under the progress message
@@ -670,13 +721,7 @@ async function sendPreview(ctx, rawUrl, L) {
   try { parsed = normalizeUrl(rawUrl); }
   catch (e) { return ctx.reply(L.errorText(codeOf(e))); }
   if (!isAdmin(ctx) && policy.isBlocked(parsed.url.hostname)) return ctx.reply(L.errorText('blocked_domain'));
-  const key = urlKey(parsed.url);
-
-  const cachedId = await previews.get(key);
-  if (cachedId) {
-    try { await ctx.replyWithPhoto(cachedId, { caption: L.previewCaption(parsed.url.host) }); return; }
-    catch { /* stale file_id: take a new one */ }
-  }
+  // a preview is always taken now: it shows the site as it is right now, never an old screenshot
   if (!CFG.enableBrowser) return ctx.reply(L.MSG.previewOff);
   if (!isAdmin(ctx) && !(await previews.cooldownOk(ctx.from.id))) return ctx.reply(L.MSG.previewWait);
 
@@ -686,8 +731,7 @@ async function sendPreview(ctx, rawUrl, L) {
     try { await assertPublicHost(parsed.url.hostname); }
     catch (e) { throw explainNetError(e, parsed.url.host); }
     const buf = await browserSem.run(() => screenshotPage(parsed.url.href));
-    const sent = await ctx.replyWithPhoto({ source: buf }, { caption: L.previewCaption(parsed.url.host) });
-    previews.set(key, sent.photo[sent.photo.length - 1].file_id);
+    await ctx.replyWithPhoto({ source: buf }, { caption: L.previewCaption(parsed.url.host) });
     ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
   } catch (e) {
     if (e instanceof UserError) return edit(L.errorText(e.code));
@@ -708,7 +752,7 @@ async function sendStored(ctx, data, label, L) {
     if (ids.length > 1) await ctx.reply(`${main}${footer}\n\n${i(L.CAP.partsHint(ids.length))}`.slice(0, 4000));
     for (let k = 0; k < ids.length; k++) {
       const extra = { caption: ids.length > 1 ? b(L.CAP.part(k + 1, ids.length)) : `${main}${footer}`.slice(0, 1000) };
-      if (k === ids.length - 1 && data.urlKey) Object.assign(extra, keyboard(L, data.urlKey, { refresh: label !== 'shared' }));
+      if (k === ids.length - 1 && label !== 'rescue') Object.assign(extra, resultMarkup(ctx, L, data.urlKey));
       await ctx.replyWithDocument(ids[k], extra);
     }
     return true;
@@ -739,48 +783,53 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
   const key = sectionKey(urlKey(parsed.url));
   const base = { userId: uid, url: parsed.url.href, urlKey: key, host: parsed.url.host };
 
-  // user check + both caches in parallel: one round-trip of latency, not three
-  const [user, hit, neg] = await Promise.all([
+  // the person, the saved copy and the recent-failure note, in parallel: one round trip of latency
+  const [user, prev, neg] = await Promise.all([
     resumed ? null : db.touchUser(ctx.from),
-    force ? null : cache.getResult(key),
+    resumed ? null : cache.getResult(key),
     force ? null : cache.getNegative(key),
   ]);
   if (user?.banned && !admin) return ctx.reply(L.MSG.banned);
-
-  // Reuse without rebuilding. "Fresh copy", and copies past their freshness window, are re-checked with the site
-  // (conditional requests, no asset downloads); when nothing changed the saved copy is simply sent again.
-  if (!resumed && (force || (!hit && !neg))) {
-    const prev = (force ? await cache.getResult(key) : null) ?? (await cache.getStale(key));
-    if (prev && (await fingerprint.available(key))) {
-      const note = await ctx.reply(L.STATUS.changes).catch(() => null);
-      const verdict = await fingerprint.probe(key).catch(() => null);
-      if (note) ctx.telegram.deleteMessage(ctx.chat.id, note.message_id).catch(() => {});
-      if (verdict === 'unchanged' && (await sendStored(ctx, prev, 'unchanged', L))) {
-        cache.setResult(key, prev); // fresh again for the next person
-        if (force) await ctx.reply(L.MSG.unchanged).catch(() => {});
-        metrics.inc('wd_cache_total', { kind: force ? 'fresh_unchanged' : 'revalidated' });
-        db.record({ ...base, status: 'ok', mode: prev.mode, cached: true, files: prev.files, zipBytes: prev.zipBytes, durationMs: 0, fileId: prev.fileId, fileName: prev.fileName, caption: prev.caption, title: prev.title });
-        return;
-      }
-    }
-  }
-
   if (extraLinks > 0) await ctx.reply(L.MSG.moreLinks(extraLinks + 1)).catch(() => {});
 
-  if (hit) {
-    if (await sendStored(ctx, hit, 'cache', L)) {
-      metrics.inc('wd_cache_total', { kind: 'fresh' });
-      db.record({ ...base, status: 'ok', mode: hit.mode, cached: true, files: hit.files, zipBytes: hit.zipBytes, durationMs: 0, fileId: hit.fileId, fileName: hit.fileName, caption: hit.caption, title: hit.title });
-      return;
-    }
-    await cache.dropResult(key); // stale file_id: rebuild below
+  // ---- Do I already have it, and is it the latest?  (rules: recheck.js)
+  // Fresh enough: sent as it is. Older (RECHECK_AFTER), or the same person asking again: the site is checked first.
+  // Unchanged: the saved ZIP. Changed: rebuilt silently, at no cost to the person. Nobody is asked anything.
+  let free = false;
+  const deliverSaved = async (label, kind) => {
+    if (!(await sendStored(ctx, prev, label, L))) { await cache.dropResult(key); return false; } // the Telegram file is gone: rebuild
+    recent.mark(uid, key);
+    metrics.inc('wd_cache_total', { kind });
+    db.record({ ...base, status: 'ok', mode: prev.mode, cached: true, files: prev.files, zipBytes: prev.zipBytes, durationMs: 0, fileId: prev.fileId, fileName: prev.fileName, caption: prev.caption, title: prev.title });
+    return true;
+  };
+  if (prev && neg && !force) {
+    // the site failed a moment ago: the copy I have is the best answer
+    if (await deliverSaved('unverified', 'unverified_down')) return;
   }
+  const repeat = !!prev && !force && (await recent.has(uid, key));
+  const plan = decideFreshness({ prev, now: Date.now(), recheckAfterMs: CFG.recheckAfterMs, staleMaxMs: CFG.staleMaxDays * 24 * 60 * 60 * 1000, repeat, force });
+  if (plan.action === 'send') {
+    if (await deliverSaved('cache', 'fresh')) return;
+  } else if (plan.action === 'check') {
+    const note = (await fingerprint.available(key)) ? await ctx.reply(L.STATUS.changes).catch(() => null) : null;
+    const res = await fingerprint.probe(key, { timeoutMs: CFG.recheckTimeoutMs }).catch(() => ({ verdict: 'unknown', reason: 'error' }));
+    if (note) ctx.telegram.deleteMessage(ctx.chat.id, note.message_id).catch(() => {});
+    const next = afterCheck(res.verdict, { repeat, reason: res.reason, verifiedAgeMs: plan.verifiedAge, unverifiableMaxMs: CFG.unverifiableMaxMs });
+    if (next.action === 'send') {
+      if (next.label === 'unchanged') await cache.touch(key, prev);
+      if (await deliverSaved(next.label, next.label === 'unchanged' ? 'checked_unchanged' : 'unverified')) return;
+    } else {
+      free = next.free;
+      metrics.inc('wd_cache_total', { kind: res.verdict === 'changed' ? 'changed' : 'rebuild_asked_again' });
+    }
+  }
+
   if (neg) {
     cache.rememberUrl(key, parsed.url.href);
-    const retry = L.failureActions(neg.code).length > 0;
-    const rescue = await rescueFor(neg.code, key);
-    const lines = [neg.message, ...(rescue ? [L.MSG.rescueNote(L.date(rescue.createdAt))] : []), ...(retry ? [i(L.MSG.retrySoon)] : [])];
-    return ctx.reply(lines.join('\n\n'), failureMarkup(L, neg.code, key, rescue) ?? undefined);
+    // saved copy in the archive? the person simply gets it. Otherwise one plain sentence.
+    if (!resumed && (await autoRescue(ctx, L, neg.code, key, (line) => ctx.reply(line)))) return;
+    return ctx.reply(neg.message, failureMarkup(L, neg.code, key, admin) ?? undefined);
   }
 
   let held = false;
@@ -791,11 +840,11 @@ async function handleRequest(ctx, raw, { force = false, resumed = false, rec = n
       held = true;
       const wait = await limits.cooldownLeft(uid);
       if (wait > 0) return ctx.reply(L.MSG.cooldown(Math.ceil(wait / 1000)));
-      if (CFG.dailyLimit) {
+      if (CFG.dailyLimit && !free) { // a rebuild because the SITE changed costs the person nothing
         const used = await quota.consume(uid);
         if (used > CFG.dailyLimit) return ctx.reply(L.MSG.daily(CFG.dailyLimit));
       }
-      if (!flights.has(key)) { // joining someone else's build costs nothing
+      if (!flights.has(key) && !free) { // joining someone else's build, or rebuilding after a change, costs nothing
         if (CFG.domainDailyCap && (await quota.domain(uid, host)) > CFG.domainDailyCap)
           return ctx.reply(L.MSG.domainCap(CFG.domainDailyCap, host));
         if (CFG.domainGlobalDaily && (await quota.domainGlobal(host)) > CFG.domainGlobalDaily)
@@ -879,6 +928,7 @@ async function build(ctx, parsed, key, base, opts) {
       log.event('job', { host: parsed.url.host, ok: true, mode: data.mode, ms: Date.now() - started, files: data.files, bytes: data.zipBytes, timings: data.timings });
       if (Date.now() - started > CFG.slowJobMs) archive.ops.post('logs', `🐢 ${esc(parsed.url.host)}  ·  ${mono(fmtMs(Date.now() - started))}  ·  ${data.files} files  ·  ${size(data.zipBytes)}`);
     } else metrics.inc('wd_cache_total', { kind: 'shared' });
+    recent.mark(uid, key); // asking for it again soon means "I want it fresh"
     if (!admin) policy.strikes.clear(uid);
     return true;
   } catch (e) {
@@ -891,25 +941,27 @@ async function build(ctx, parsed, key, base, opts) {
       return false;
     }
     // precise detail stays in the logs and database; the user gets a short human message
-    const base = L.errorText(code);
-    const rescue = await rescueFor(code, key);
-    const text = rescue ? `${base}\n\n${L.MSG.rescueNote(L.date(rescue.createdAt))}` : base;
+    const errText = L.errorText(code);
     if (code === 'internal') console.error('job failed:', e);
     else log.event('job', { host: parsed.url.host, ok: false, code, ms: Date.now() - started, detail: e?.message }, 'warn');
     metrics.inc('wd_jobs_total', { result: 'failed', code });
-    cache.rememberUrl(key, parsed.url.href); // lets the Try again button find the link
-    update(text, failureMarkup(L, code, key, rescue));
-    if (leader && e instanceof UserError) cache.setNegative(key, { message: base, code }, code === 'zip_too_big' ? 6 * 60 * 60 * 1000 : CFG.negTtlMs);
+    cache.rememberUrl(key, parsed.url.href); // lets an admin's Try again button find the link
+    if (leader && e instanceof UserError) cache.setNegative(key, { message: errText, code }, code === 'zip_too_big' ? 6 * 60 * 60 * 1000 : CFG.negTtlMs);
+    // the site could not be saved: when a copy exists the person simply gets it (one plain line, no button to find);
+    // otherwise one plain sentence. Admins also get Try again.
+    const rescued = await autoRescue(ctx, L, code, key, async (line) => { update(line, null); await update.flush(); });
+    if (!rescued) update(errText, failureMarkup(L, code, key, admin));
     await update.flush();
     if (leader) {
       recordJob(false, code);
       const who = archive.userTag(uid);
       const took = fmtMs(Date.now() - started);
-      if (!VISITOR_CODES.has(code)) archive.ops.post('errors', `❗ ${b('Job failed')}  ${mono(code)}\n🌐 ${esc(parsed.url.host)}\n👤 ${who}  ·  ⏱ ${took}\n<pre>${esc(String(e?.message || e).slice(0, 300))}</pre>`);
+      // Errors (loud) is for failures that are OURS. A dead or slow site, even after the quiet retries, is the site's problem: a quiet log line.
+      if (!VISITOR_CODES.has(code) && !AUTO_RETRY_CODES.has(code)) archive.ops.post('errors', `❗ ${b('Job failed')}  ${mono(code)}\n🌐 ${esc(parsed.url.host)}\n👤 ${who}  ·  ⏱ ${took}\n<pre>${esc(String(e?.message || e).slice(0, 300))}</pre>`);
       else archive.ops.post('logs', `🟡 ${esc(parsed.url.host)}  ·  ${mono(code)}  ·  ${took}  ·  ${who}`);
     }
     if (!admin) policy.strikes.fail(uid, code);
-    db.record({ ...base, status: 'failed', errorCode: code, durationMs: Date.now() - started });
+    db.record({ ...base, status: 'failed', errorCode: code, durationMs: Date.now() - started }); // `base` is the record, not the message
     return false;
   } finally {
     f.members.delete(uid);
@@ -922,7 +974,24 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wd-'));
   try {
     if (signal.aborted) throw new UserError('cancelled', 'cancelled');
-    const r = await downloadWebsite(parsed, workDir, update, { L, signal });
+    // Problems that usually pass (a slow answer, a 5xx, a rate limit) are retried twice, quietly, a few seconds apart.
+    // The person only hears about it if all three attempts fail. A retry is part of the same job: it costs no quota.
+    let r;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        r = await downloadWebsite(parsed, workDir, update, { L, signal });
+        break;
+      } catch (e) {
+        const code = codeOf(e);
+        if (attempt >= 2 || signal.aborted || !AUTO_RETRY_CODES.has(code)) throw e;
+        log.event('retry', { host: parsed.url.host, attempt: attempt + 1, code }, 'warn');
+        metrics.inc('wd_retries_total', { code });
+        await sleepMs(CFG.retryDelayMs * (attempt + 1));
+        await fs.rm(path.join(workDir, 'site'), { recursive: true, force: true }); // no leftovers from the failed attempt
+        if (signal.aborted) throw new UserError('cancelled', 'cancelled');
+        update(L.STATUS.opening(parsed.url.host));
+      }
+    }
     const parts = r.parts;
     const n = parts.length;
     const caption = JSON.stringify(buildSummary(r, n)); // structured: each reader sees it in their own language
@@ -939,7 +1008,7 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
         { source: parts[k].zipPath, filename: parts[k].zipName },
         {
           caption: n > 1 ? b(L.CAP.part(k + 1, n)) : L.caption(caption),
-          ...(k === n - 1 ? keyboard(L, key, { refresh: false }) : {}),
+          ...(k === n - 1 ? resultMarkup(ctx, L, key) : {}),
         }
       );
       ids.push(msg.document.file_id);
@@ -955,7 +1024,7 @@ async function produce(ctx, parsed, key, update, { L, signal }) {
     archive.record({
       urlKey: key, host: r.host, title: r.title, url: `${parsed.url.origin}${parsed.url.pathname}`, fileIds: ids, fileName: parts[0].zipName, parts: n,
       pages: r.pages, files: r.fileCount, bytes: r.zipBytes, mode: r.mode, kind: r.kind,
-      previewFileId: await previews.get(urlKey(parsed.url)).catch(() => null), previewBuffer: r.preview,
+      previewFileId: null, previewBuffer: r.preview, // a picture only when the browser rendered the page anyway
     }).catch(() => {});
     return data;
   } finally {

@@ -49,7 +49,7 @@ export const VARS = [
   ['site', 'SITE_SITEMAP', 'true', 'Read sitemap.xml to find pages.'],
   ['site', 'SITE_SITEMAP_URLS', '1000', 'Most URLs taken from a sitemap.'],
   // zip
-  ['zip', 'PART_MB', '40', 'Target size of each ZIP part (Telegram allows 50 MB; with a self-hosted Bot API the default becomes 1500).'],
+  ['zip', 'PART_MB', '48', 'Target size of each ZIP part (Telegram allows 50 MB; with a self-hosted Bot API the default becomes 1500).'],
   ['zip', 'MAX_FILE_MB', '42', 'Largest single file saved (with a self-hosted Bot API the default becomes 150).'],
   ['zip', 'MAX_TOTAL_MB', '120', 'Default size cap for a single job when a caller does not set its own.'],
   ['zip', 'MAX_FILES', '1500', 'Default file-count cap for a single job when a caller does not set its own.'],
@@ -61,11 +61,15 @@ export const VARS = [
   ['speed', 'HOST_GAP_MS', '8', 'Minimum gap between requests to one host, in ms (grows automatically on 429/503).'],
   ['speed', 'ASSET_STALL_SEC', '10', 'Give up on a file when no data arrives for this many seconds.'],
   ['speed', 'SHARED_CACHE_MB', '256', 'Size of the shared cache for popular library and font files. 0 = off.'],
-  ['speed', 'IMAGE_COMPRESS', 'true', 'Shrink big images before leaving anything out (needs the optional sharp package).'],
+  ['speed', 'LOSSLESS_OPTIMIZE', 'true', 'Re-pack PNG and JPEG images without changing a single pixel (each result is verified; anything that differs or saves under 3% is left as it was). Needs the optional sharp package; JPEG also needs jpegtran.'],
+  ['speed', 'LOSSLESS_MAX_SEC', '20', 'Most seconds a job spends on lossless image optimizing.'],
+  ['speed', 'IMAGE_COMPRESS', 'false', 'Lossy: shrink big images to fit when a site is too large. Off by default: copies are exact mirrors. Turn on only if you prefer smaller over exact.'],
   ['speed', 'LINK_CHECK', 'true', 'Verify every local link before sending; broken ones point back to the live site.'],
   // cache
-  ['cache', 'CACHE_TTL_MIN', '1440', 'Minutes a saved copy is sent as-is.'],
-  ['cache', 'STALE_MAX_DAYS', '7', 'Copies up to this old are re-checked with the site and re-sent when nothing changed.'],
+  ['cache', 'RECHECK_AFTER', '10m', 'How long a saved copy counts as fresh. Younger copies are sent as they are; older ones are checked with the site first (unchanged: same ZIP, changed: rebuilt automatically, free). Examples: 10m, 30m, 2h, 1d, 7d. 0 = check every time.'],
+  ['cache', 'RECHECK_TIMEOUT', '6', 'Seconds the change check may take before the saved copy is sent with a "couldn\'t check" note.'],
+  ['cache', 'STALE_MAX_DAYS', '7', 'Saved copies are kept this long; an older one is simply rebuilt.'],
+  ['cache', 'RETRY_DELAY_SEC', '4', 'Seconds between the two quiet retries of a failing site (the second wait is twice as long).'],
   ['cache', 'NEG_CACHE_SEC', '300', 'Seconds a failure is remembered, so the same dead link is not retried at once.'],
   ['cache', 'RETENTION_DAYS', '90', 'Days history is kept (people can choose 7, 30 or never with /privacy).'],
   // browser
