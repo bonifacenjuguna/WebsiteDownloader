@@ -1,4 +1,4 @@
-# Website Downloader (@WebsiteDownloaderBot) v1.10.1
+# Website Downloader (@WebsiteDownloaderBot) v1.10.2
 
 Telegram bot (Node.js + Telegraf) that turns any website into an offline copy: every page, image and file, linked locally.
 Send `example.com` (or a message that contains a link) -> get one or more ZIPs -> unzip ALL of them into the same folder -> open `index.html`.
@@ -208,7 +208,8 @@ Admins: `/ping`, `/stats`, `/ban <id>`, `/unban <id>`, `/block <domain>`, `/unbl
 
 - Any message containing a link works. Tracking parameters (`utm_*`, `fbclid`, ...) are removed. With several links the first is saved.
 - `/history`: tap to resend, ✖ to remove one, 🗑 to clear all. `/privacy`: auto-delete (7 days / 30 days / never / default) and delete all your data.
-- `/preview` sends a fresh screenshot of the **live** site (top of page), every time. It is a command only: people get no buttons under results.
+- `/preview example.com` sends a fresh screenshot of the **live** site (top of page), every time. It is a command only: people get no buttons under results.
+  - A bare `/preview` asks *"Send me the website you want to preview"* and opens a **2-minute window for exactly one link or domain**. A single address is previewed (once); anything else (words around the link, two links, no link, any other command) closes the window and the message is handled as a normal download. It expires by itself after two minutes.
 - Every progress message has ✖ Cancel.
 - `/language`: English, Español, Français, Português, Deutsch, Русский, Kiswahili. Default: the person's Telegram language.
 - There is no `/browser` command: browser use is decided automatically.

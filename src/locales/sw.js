@@ -67,6 +67,7 @@ export default {
     internal: '❌ Hitilafu imetokea. Tafadhali jaribu tena.',
   },
   MSG: {
+    previewAsk: '🖼 <b>Nitumie tovuti unayotaka kuiona.</b>\n<i>Anwani tu, hakuna kingine. Kwa mfano example.com</i>',
     rescueNote: (date) => `📦 Nina nakala iliyohifadhiwa ya <b>${date}</b>.`,
     rescueAuto: (date) => `📦 <b>Tovuti hii haipatikani kwa sasa.</b>\nHii hapa nakala ya hivi karibuni niliyohifadhi, ya <b>${date}</b>.`,
     rescueGone: 'Nakala hiyo iliyohifadhiwa haipatikani tena.',

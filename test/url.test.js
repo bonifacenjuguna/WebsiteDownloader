@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeUrl, extractUrls, urlKey, sectionKey } from '../src/url.js';
+import { normalizeUrl, extractUrls, singleLink, urlKey, sectionKey } from '../src/url.js';
 
 test('normalizeUrl adds https, strips fragments, credentials and tracking parameters', () => {
   const { url, explicitScheme } = normalizeUrl('example.com/a?utm_source=x&fbclid=1&keep=2#top');
@@ -26,4 +26,15 @@ test('urlKey ignores www., scheme and trailing slash; sectionKey differs', () =>
   const b = urlKey(new URL('http://example.com/docs'));
   assert.equal(a, b);
   assert.notEqual(a, sectionKey(a));
+});
+
+test('singleLink: the whole message must be ONE link or domain, nothing else', () => {
+  for (const ok of ['example.com', 'EXAMPLE.com', ' example.com ', 'https://example.com/a?b=1', 'http://8.8.8.8/', 'foo.co.ke/docs', 'example.com,']) {
+    assert.ok(singleLink(ok), `should accept ${JSON.stringify(ok)}`);
+  }
+  assert.equal(singleLink('https://Example.com/a?utm_source=x').url.href, 'https://example.com/a', 'tracking is stripped like everywhere else');
+  for (const bad of ['', '   ', 'hello', 'check example.com', 'example.com please', 'a.com b.org', '/help', '/preview example.com', 'mailto:a@b.com', 'localhost', 'https://', 'hello.', 'see:\nexample.com']) {
+    assert.equal(singleLink(bad), null, `should refuse ${JSON.stringify(bad)}`);
+  }
+  assert.equal(singleLink(null), null);
 });

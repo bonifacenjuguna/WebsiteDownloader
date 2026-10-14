@@ -67,6 +67,7 @@ export default {
     internal: '❌ Algo salió mal. Inténtalo de nuevo.',
   },
   MSG: {
+    previewAsk: '🖼 <b>Envíame el sitio web que quieres ver.</b>\n<i>Solo la dirección, nada más. Por ejemplo example.com</i>',
     rescueNote: (date) => `📦 Tengo una copia guardada del <b>${date}</b>.`,
     rescueAuto: (date) => `📦 <b>Este sitio no está disponible ahora mismo.</b>\nAquí tienes la última copia que guardé, del <b>${date}</b>.`,
     rescueGone: 'Esa copia guardada ya no está disponible.',

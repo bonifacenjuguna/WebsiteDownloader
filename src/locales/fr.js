@@ -67,6 +67,7 @@ export default {
     internal: '❌ Une erreur s’est produite. Réessayez.',
   },
   MSG: {
+    previewAsk: '🖼 <b>Envoyez-moi le site à prévisualiser.</b>\n<i>Juste l’adresse, rien d’autre. Par exemple example.com</i>',
     rescueNote: (date) => `📦 J’ai une copie sauvegardée du <b>${date}</b>.`,
     rescueAuto: (date) => `📦 <b>Ce site n’est pas joignable pour le moment.</b>\nVoici la dernière copie que j’ai enregistrée, du <b>${date}</b>.`,
     rescueGone: 'Cette copie sauvegardée n’est plus disponible.',

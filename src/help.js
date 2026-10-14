@@ -70,6 +70,7 @@ const TOPICS = [
       'Take a look before you download:',
       '',
       '• <code>/preview example.com</code>',
+      '• or send <code>/preview</code> on its own, then just the address (nothing else). Anything other than a single address cancels the preview and is treated as a normal download.',
       '',
       'You get a fresh screenshot of the live page as it is right now, every time, never your saved copy.',
     ].join('\n')],

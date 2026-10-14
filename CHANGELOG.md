@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.2
+- **`/preview` on its own now works the way people expect.** It asks *"Send me the website you want to preview"* and opens a 2-minute window for exactly ONE link or domain. A lone address is previewed (the window is single use). Anything else closes the window and is treated as a normal message: words around the link, two links, no link at all, or any other command. It also expires by itself after two minutes. `/preview example.com` still previews at once.
+- Translated into all 6 languages; `/help` explains it. 7 new end-to-end checks (accepted once, and every way of closing the window) and a unit test of the single-link rule.
+
 ## 1.10.1
 - `/preview` is now in Telegram's command menu, right after `/start` (it was only mentioned in `/help`, so it was easy to miss). Admins see the same five first, then their extras. Tapping it without a link explains how to use it.
 

@@ -67,6 +67,7 @@ export default {
     internal: '❌ Etwas ist schiefgelaufen. Bitte versuche es erneut.',
   },
   MSG: {
+    previewAsk: '🖼 <b>Sende mir die Website, die du ansehen möchtest.</b>\n<i>Nur die Adresse, sonst nichts. Zum Beispiel example.com</i>',
     rescueNote: (date) => `📦 Ich habe eine gespeicherte Kopie vom <b>${date}</b>.`,
     rescueAuto: (date) => `📦 <b>Diese Website ist gerade nicht erreichbar.</b>\nHier ist die letzte Kopie, die ich gespeichert habe, vom <b>${date}</b>.`,
     rescueGone: 'Diese gespeicherte Kopie ist nicht mehr verfügbar.',

@@ -149,8 +149,11 @@ export const recent = {
   mark: (uid, key) => kv.set(`last:${uid}:${key}`, '1', Math.min(6 * 60 * 60 * 1000, Math.max(10 * 60 * 1000, CFG.recheckAfterMs))),
   async has(uid, key) { return !!(await kv.get(`last:${uid}:${key}`)); },
 };
-// previews are always taken fresh now; only the per-person pause between them is kept
+// previews are always taken fresh. A bare /preview opens a 2-minute window for ONE link; the per-person pause is kept.
 export const previews = {
+  startWait: (uid) => kv.set(`pvwait:${uid}`, '1', 2 * 60 * 1000),
+  async takeWait(uid) { const had = await kv.get(`pvwait:${uid}`); if (had) await kv.del(`pvwait:${uid}`); return !!had; }, // single use
+  clearWait: (uid) => kv.del(`pvwait:${uid}`),
   cooldownOk: (uid) => kv.setNx(`pcd:${uid}`, '1', 10_000),
 };
 

@@ -174,7 +174,7 @@ const EN = {
     previewWait: '⏳ One preview at a time. Try again in a few seconds.',
     previewFail: "🖼 I couldn't capture a preview of that page.",
     usageDownload: `Send /download followed by a link, for example:\n${code('/download example.com')}`,
-    usagePreview: `Send /preview followed by a link, for example:\n${code('/preview example.com')}`,
+    previewAsk: `🖼 ${b('Send me the website you want to preview.')}\n${i('Just the address, nothing else. For example example.com')}`,
     // privacy
     privacy: (retention) => [
       '🔒 <b>Privacy</b>',

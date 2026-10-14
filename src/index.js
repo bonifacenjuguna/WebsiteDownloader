@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { Telegraf, Telegram, Markup } from 'telegraf';
 import { CFG } from './config.js';
-import { normalizeUrl, extractUrls, urlKey, sectionKey, bareHost } from './url.js';
+import { normalizeUrl, extractUrls, singleLink, urlKey, sectionKey, bareHost } from './url.js';
 import { downloadWebsite } from './site.js';
 import { JobQueue } from './queue.js';
 import { UserError, explainNetError } from './errors.js';
@@ -96,6 +96,13 @@ const archive = createArchive({
     env: { live: CFG.liveChatId, vault: CFG.vaultChatId, ops: CFG.opsChatId },
   },
   secret: CFG.token, botId: () => botIdValue, alert: (html) => alertEverywhere(html), log: console,
+});
+
+// Any command other than /preview closes an open preview window, so the next link is never previewed by surprise.
+bot.use(async (ctx, next) => {
+  const t = ctx.message?.text;
+  if (t && t.startsWith('/') && ctx.from && !/^\/preview(@\w+)?(\s|$)/i.test(t)) await previews.clearWait(ctx.from.id);
+  return next();
 });
 
 const isAdmin = (ctx) => CFG.adminIds.includes(ctx.from?.id);
@@ -197,11 +204,15 @@ for (const cmd of ['download', 'site']) {
   });
 }
 
+// /preview example.com previews at once. A bare /preview asks for the link and opens a 2-minute window for exactly ONE
+// link or domain: anything else closes it and is handled as a normal message (see the text handler).
 bot.command('preview', async (ctx) => {
   const L = await Lof(ctx);
+  if (!(await authorize(ctx, L))) return undefined;
   const urls = extractUrls(restOf(ctx));
-  if (!urls.length) return ctx.reply(L.MSG.usagePreview);
-  if (await authorize(ctx, L)) sendPreview(ctx, urls[0].url.href, L).catch(console.error);
+  if (urls.length) { await previews.clearWait(ctx.from.id); return sendPreview(ctx, urls[0].url.href, L).catch(console.error); }
+  await previews.startWait(ctx.from.id);
+  return ctx.reply(L.MSG.previewAsk);
 });
 
 // ---- history: tap to resend, ✖ to remove one, 🗑 to clear all ----
@@ -710,6 +721,16 @@ bot.command('archive', async (ctx) => {
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/') || ctx.chat.type !== 'private') return;
+  // The preview window (opened by a bare /preview): exactly one link or domain is previewed. ANYTHING else (words around it,
+  // two links, no link) closes the window, and the message goes on to be handled as a normal download request below.
+  if (await previews.takeWait(ctx.from.id)) {
+    const single = singleLink(text);
+    if (single) {
+      const L = await Lof(ctx);
+      if (await authorize(ctx, L)) sendPreview(ctx, single.url.href, L).catch(console.error);
+      return;
+    }
+  }
   const urls = extractUrls(text);
   if (!urls.length) return ctx.reply((await Lof(ctx)).MSG.noLink);
   handleRequest(ctx, urls[0].url.href, { extraLinks: urls.length - 1 }).catch(console.error);

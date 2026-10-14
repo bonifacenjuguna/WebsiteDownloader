@@ -32,7 +32,7 @@ async function run() {
   const LIVE = -1001000000001; const VAULT = -1001000000002; const OPS = -1001000000003;
   const world = new HarnessTelegram();
   world.addChat(ADMIN, { type: 'private' }).addChat(USER, { type: 'private' }).addChat(LIVE).addChat(VAULT).addChat(OPS, { type: 'supergroup', is_forum: true, title: 'Ops' });
-  for (const id of [222, 333, 444, 555, 777, 888]) world.addChat(id, { type: 'private' });
+  for (const id of [222, 333, 444, 555, 777, 888, 901, 902, 903, 904, 905, 906, 907]) world.addChat(id, { type: 'private' });
   world.chats.get(LIVE).title = 'Live'; world.chats.get(VAULT).title = 'Vault';
 
   // ---- the three replaced modules
@@ -46,7 +46,7 @@ async function run() {
     action(re, fn) { this.actions.push([re, fn]); }
     on(type, fn) { this.ons[type] = fn; }
     catch() {}
-    use() {}
+    use(fn) { (this.mw ??= []).push(fn); }
     launch() { return new Promise(() => {}); }
     stop() {}
     webhookCallback() { return () => {}; }
@@ -109,7 +109,9 @@ async function run() {
   const say = (userId, text) => {
     const cmd = text.startsWith('/') ? text.split(/\s+/)[0].slice(1).split('@')[0] : null;
     const ctx = ctxFor({ userId, text });
-    return cmd ? bot.cmds[cmd](ctx) : bot.ons.text(ctx);
+    let i = 0; // middleware first (bot.use), then the command or text handler: the order Telegraf uses
+    const next = async () => { const mw = (bot.mw || [])[i++]; return mw ? mw(ctx, next) : (cmd ? bot.cmds[cmd](ctx) : bot.ons.text(ctx)); };
+    return next();
   };
   const tap = async (userId, msg, data) => {
     for (const [re, fn] of bot.actions) {
@@ -509,6 +511,84 @@ async function run() {
     assert.equal(shots, before + 2, 'each preview is a new screenshot');
     assert.match(one.caption, /^🖼 <b>8\.8\.8\.8<\/b>\n<i>Live preview of the page as it is right now\.<\/i>$/);
     assert.deepEqual(buttons(one), []);
+  });
+
+  // ---- the preview window: a bare /preview asks for ONE link; anything else closes it and is a normal message
+  const photosOf = (chat) => msgs(chat).filter((m) => m.kind === 'photo');
+
+  test('a bare /preview asks for the website, takes exactly ONE link or domain, and the window is single use', async () => {
+    await say(901, '/preview');
+    const ask = msgs(901).at(-1);
+    assert.equal(text(ask), '🖼 <b>Send me the website you want to preview.</b>\n<i>Just the address, nothing else. For example example.com</i>');
+    assert.deepEqual(buttons(ask), []);
+    const before = shots;
+    await say(901, 'http://8.8.8.8/');
+    const photo = await waitFor(() => photosOf(901)[0], 5000, 'the preview');
+    assert.equal(shots, before + 1);
+    assert.match(photo.caption, /^🖼 <b>8\.8\.8\.8<\/b>/);
+    assert.equal(docsOf(901).length, 0, 'a preview, not a download');
+    await say(901, 'one.example');                                              // the window is used up: a normal download
+    await waitFor(() => docsOf(901)[0], 8000, 'a normal download');
+    assert.equal(shots, before + 1, 'no second screenshot');
+  });
+
+  test('preview window: words around the link close it, and the message becomes a normal download', async () => {
+    await say(902, '/preview');
+    const before = shots;
+    await say(902, 'please http://8.8.8.8/ thanks');
+    await waitFor(() => docsOf(902)[0], 8000, 'a normal download');
+    assert.equal(shots, before, 'no screenshot');
+    assert.equal(photosOf(902).length, 0);
+  });
+
+  test('preview window: no link at all closes it; the next link is a normal download', async () => {
+    await say(903, '/preview');
+    await say(903, 'hello');
+    assert.match(text(msgs(903).at(-1)), /couldn't find a website address/, 'the normal reply for a message without a link');
+    const before = shots;
+    await say(903, 'http://8.8.8.8/');
+    await waitFor(() => docsOf(903)[0], 8000, 'a normal download');
+    assert.equal(shots, before);
+    assert.equal(photosOf(903).length, 0);
+  });
+
+  test('preview window: any other command closes it', async () => {
+    await say(904, '/preview');
+    await say(904, '/help');
+    const before = shots;
+    await say(904, 'http://8.8.8.8/');
+    await waitFor(() => docsOf(904)[0], 8000, 'a normal download');
+    assert.equal(shots, before);
+    assert.equal(photosOf(904).length, 0);
+  });
+
+  test('preview window: two links close it; the first is downloaded and the person is told', async () => {
+    await say(905, '/preview');
+    const before = shots;
+    await say(905, 'one.example two.example');
+    await waitFor(() => msgs(905).some((m) => /I found <b>2<\/b> links|I found 2 links/.test(text(m))), 6000, 'the several-links note');
+    await waitFor(() => docsOf(905)[0], 8000, 'the first link downloaded');
+    assert.equal(shots, before);
+    assert.equal(photosOf(905).length, 0);
+  });
+
+  test('preview window: it expires by itself after two minutes', async () => {
+    await say(906, '/preview');
+    await kv.del('pvwait:906');                                                 // two minutes later
+    const before = shots;
+    await say(906, 'http://8.8.8.8/');
+    await waitFor(() => docsOf(906)[0], 8000, 'a normal download');
+    assert.equal(shots, before);
+  });
+
+  test('/preview with a link previews at once and leaves no window open', async () => {
+    await say(907, '/preview');
+    await say(907, '/preview http://8.8.8.8/');
+    await waitFor(() => photosOf(907)[0], 5000, 'the preview');
+    const before = shots;
+    await say(907, 'one.example');
+    await waitFor(() => docsOf(907)[0], 8000, 'a normal download');
+    assert.equal(shots, before, 'the window was closed by the inline link');
   });
 
   test('buttons on old messages from earlier versions still work (as a normal request for people)', async () => {

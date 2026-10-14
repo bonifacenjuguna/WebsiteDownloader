@@ -31,6 +31,14 @@ export function normalizeUrl(input) {
   return { url, explicitScheme };
 }
 
+// The whole message is ONE link or domain and nothing else (used by the preview window). Words around it, a second link,
+// a command, or no link at all: null.
+export function singleLink(text) {
+  const t = String(text || '').trim();
+  if (!t || /\s/.test(t) || t.startsWith('/')) return null;
+  try { return normalizeUrl(t); } catch { return null; }
+}
+
 // Finds website addresses anywhere in a message ("check out https://x.com/a, it's great") in reading order.
 const SCHEME_RE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
 const BARE_RE = /(?<![@\w./-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?::\d{2,5})?(?:[/?#][^\s<>"'`]*)?/gi;
