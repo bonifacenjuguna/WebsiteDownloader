@@ -1146,6 +1146,7 @@ async function main() {
   // the menu stays short; everything else still works when typed
   const commands = [
     { command: 'start', description: 'Welcome and quick start' },
+    { command: 'preview', description: 'See a live website before saving it' },
     { command: 'help', description: 'What I can do, with guides' },
     { command: 'history', description: 'Your recent downloads' },
     { command: 'privacy', description: 'Your data and auto-delete' },

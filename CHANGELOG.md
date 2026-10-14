@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.10.1
+- `/preview` is now in Telegram's command menu, right after `/start` (it was only mentioned in `/help`, so it was easy to miss). Admins see the same five first, then their extras. Tapping it without a link explains how to use it.
+
 ## 1.10.0 - Always the latest, with no buttons, and exact mirrors
 The principle: people send a link and get the newest ZIP; the backend makes every decision.
 

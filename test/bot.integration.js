@@ -141,10 +141,11 @@ async function run() {
   test('startup: the menu is synced (admin gets more) and admins are told it is online', async () => {
     await waitFor(() => msgs(ADMIN).some((m) => /is online/.test(text(m))), 6000, 'the online message');
     const pub = world.menus.get('default||').map((c) => c.command);
-    assert.deepEqual(pub, ['start', 'help', 'history', 'privacy']);
+    assert.deepEqual(pub, ['start', 'preview', 'help', 'history', 'privacy'], '/preview sits right after /start');
     assert.ok(!pub.includes('browser'));
     const adm = world.menus.get(`chat||${ADMIN}`).map((c) => c.command);
-    for (const c of ['ping', 'stats', 'ban', 'block', 'archive']) assert.ok(adm.includes(c), c);
+    for (const c of ['preview', 'ping', 'stats', 'ban', 'block', 'archive']) assert.ok(adm.includes(c), c);
+    assert.deepEqual(adm.slice(0, 5), ['start', 'preview', 'help', 'history', 'privacy'], 'admins see the same menu first, then their extras');
     const online = msgs(ADMIN).find((m) => /is online/.test(text(m)));
     assert.match(text(online), /Redis/);
     assert.match(text(online), /Updates by <b>polling<\/b>/);
